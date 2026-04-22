@@ -1,6 +1,6 @@
 [project]
 name = "spur-python"
-version = "0.1.0b1"
+version = "0.1.1"
 description = "Spatial error dependence diagnostics and corrections based on Müller-Watson, Econometrica 2024"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "scpc-python>=0.1.0b4",
+    "scpc-python>=0.1.1",
     "numpy>=2.4.4",
     "pandas>=3.0.2",
     "scipy>=1.17.1",
