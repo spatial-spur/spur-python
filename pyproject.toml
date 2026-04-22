@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "scpc-python>=0.1.0b3",
+    "scpc-python>=0.1.0b4",
     "numpy>=2.4.4",
     "pandas>=3.0.2",
     "scipy>=1.17.1",
