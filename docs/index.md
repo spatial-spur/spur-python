@@ -108,10 +108,27 @@ scpc_transformed = scpc(
 print(scpc_transformed.summary())
 ```
 
-### Sanity check
+### Pipeline wrapper
 
-As a sanity check, we recommend validating that your regression residuals do not have a spatial unit root. 
-You can do that using the `I(0) residual` and `I(1) residual` tests:
+As a shortcut to implementing all of those steps individually, we also provide a `spur()` wrapper that implements the entire pipeline in one step. It simply runs all tests and returns all results.
+
+```python
+import spur
+
+pipeline = spur(
+    "am ~ gini + fracblack",
+    df,
+    lon="lon",
+    lat="lat",
+)
+
+print(pipeline.summary())
+```
+
+### Residual tests
+
+We also provide tests for spatial unit roots in regression residuals
+rather than the dependent variable itself:
 
 ```python
 from spur import spurtest_i0resid, spurtest_i1resid
@@ -129,23 +146,6 @@ i1resid = spurtest_i1resid(
     lon="lon",
     lat="lat",
 )
-```
-
-### Pipeline wrapper
-
-As a shortcut to implementing all of those steps individually, we also provide a `spur()` wrapper that implements the entire pipeline in one step. It simply runs all tests and returns all results.
-
-```python
-import spur
-
-pipeline = spur(
-    "am ~ gini + fracblack",
-    df,
-    lon="lon",
-    lat="lat",
-)
-
-print(pipeline.summary())
 ```
 
 ## Next Step
