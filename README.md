@@ -5,25 +5,28 @@
   <img src="assets/logo.png" alt="SPUR logo">
 </p>
 
-# spur-python: A Python Package for Spatial Unit Roots
+# spur-python
 
-A Python implementation of the methods for diagnosing and correcting spatial unit roots developed by Muller and Watson (2024). This is a complete port of the Stata package [SPUR](https://github.com/pdavidboll/SPUR) (Becker, Boll and Voth 2025) — see the [forthcoming *Stata Journal* article](https://warwick.ac.uk/fac/soc/economics/research/workingpapers/2025/twerp_1541-_becker.pdf) for the practitioner's guide.
+`spur-python` implements diagnostics and correction methods for spatial unit roots developed by Müller and Watson (2024) in Python.
+
+**When using this code, please cite [Becker, Boll and Voth (2026)](https://pauldavidboll.com/SPUR_Stata_Journal_website.pdf):**
+
+```bibtex
+@Article{becker2026,
+  author    = {Becker, Sascha O. and Boll, P. David and Voth, Hans-Joachim},
+  title     = {Testing and Correcting for Spatial Unit Roots in Regression Analysis},
+  journal   = {Stata Journal},
+  year      = {forthcoming},
+  note      = {Forthcoming}
+}
+```
+
+If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 
 
 ## Installation
 
-The easiest way to get started is to install our coding-agent skills. 
-Just point your agent at our `spur-skills` repository:
-
-```bash
-codex --dangerously-bypass-approvals-and-sandbox "Install spur-skills by following https://github.com/spatial-spur/spur-skills#install"
-```
-
-```bash
-claude --dangerously-skip-permissions "Install spur-skills by following https://github.com/spatial-spur/spur-skills#install"
-```
-
-You can install just the package with:
+You can install the package with:
 
 ```bash
 uv pip install spur-python
@@ -99,29 +102,14 @@ SCPC avc               0.0300         0.0300
 --------------------------------------------
 ```
 
-## Citation
+## Documentation
 
-```bibtex
-@Article{becker2025,
-  author  = {Becker, Sascha O. and Boll, P. David and Voth, Hans-Joachim},
-  title   = {Testing and Correcting for Spatial Unit Roots in Regression Analysis},
-  journal = {Stata Journal},
-  year    = {forthcoming}
-}
-
-@Article{muller2024,
-  author  = {M{\"u}ller, Ulrich K. and Watson, Mark W.},
-  title   = {Spatial Unit Roots and Spurious Regression},
-  journal = {Econometrica},
-  year    = {2024},
-  volume  = {92},
-  number  = {5},
-  pages   = {1661--1695}
-}
-```
+Please refer to [the package documentation](https://spatial-spur.github.io/scpcR/) for detailed information and other (R, Python, Stata) packages.
 
 ## References
 
-- Muller, Ulrich K. and Mark W. Watson (2024). "Spatial Unit Roots and Spurious Regression." *Econometrica* 92(5), 1661-1695.
-- Becker, Sascha O., P. David Boll, and Hans-Joachim Voth (2025). "Testing and Correcting for Spatial Unit Roots in Regression Analysis." *Stata Journal*, forthcoming. [[PDF]](https://warwick.ac.uk/fac/soc/economics/research/workingpapers/2025/twerp_1541-_becker.pdf)
-- Chetty, Raj, Nathaniel Hendren, Patrick Kline, and Emmanuel Saez (2014). "Where is the Land of Opportunity? The Geography of Intergenerational Mobility in the United States." *QJE* 129(4).
+Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", Forthcoming at the Stata Journal.
+
+Chetty, Raj, Nathaniel Hendren, Patrick Kline, Emmanuel Saez "Where is the land of Opportunity? The Geography of Intergenerational Mobility in the United States" , The Quarterly Journal of Economics 129(4) (2014), 1553–1623, https://doi.org/10.1093/qje/qju022
+
+Müller, Ulrich K. and Mark W. Watson "Spatial Unit Roots and Spurious Regression", Econometrica 92(5) (2024), 1661–1695. https://www.princeton.edu/~umueller/SPUR.pdf.
