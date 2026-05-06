@@ -9,18 +9,7 @@
 
 `spur-python` implements diagnostics and correction methods for spatial unit roots developed by Müller and Watson (2024) in Python.
 
-**When using this code, please cite [Becker, Boll and Voth (2026)](https://pauldavidboll.com/SPUR_Stata_Journal_website.pdf):**
-
-```bibtex
-@Article{becker2026,
-  author    = {Becker, Sascha O. and Boll, P. David and Voth, Hans-Joachim},
-  title     = {Testing and Correcting for Spatial Unit Roots in Regression Analysis},
-  journal   = {The Stata Journal},
-  year      = {2026},
-  note      = {In press},
-  url       = {https://wrap.warwick.ac.uk/id/eprint/194576/}
-}
-```
+**Citation:** If you use this package, please cite [Becker et al. 2026](CITATION.cff) and [Müller & Watson 2024](CITATION.cff). See [CITATION.cff](CITATION.cff) for copyable citation metadata.
 
 If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 
