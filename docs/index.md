@@ -1,4 +1,10 @@
+<div class="package-overview-header" markdown="1">
+
 # spur-python
+
+[GitHub repository](https://github.com/spatial-spur/spur-python){ .md-button }
+
+</div>
 
 `spur-python` implements the SPUR workflow for diagnosing and correcting
 spatial unit roots in cross-sectional regressions. It covers the diagnostic and
