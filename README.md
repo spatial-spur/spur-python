@@ -15,9 +15,10 @@
 @Article{becker2026,
   author    = {Becker, Sascha O. and Boll, P. David and Voth, Hans-Joachim},
   title     = {Testing and Correcting for Spatial Unit Roots in Regression Analysis},
-  journal   = {Stata Journal},
-  year      = {forthcoming},
-  note      = {Forthcoming}
+  journal   = {The Stata Journal},
+  year      = {2026},
+  note      = {In press},
+  url       = {https://wrap.warwick.ac.uk/id/eprint/194576/}
 }
 ```
 
@@ -104,12 +105,12 @@ SCPC avc               0.0300         0.0300
 
 ## Documentation
 
-Please refer to [the package documentation](https://spatial-spur.github.io/scpcR/) for detailed information and other (R, Python, Stata) packages.
+Please refer to [the package documentation](https://spatial-spur.github.io/spur-python/) for detailed information and other (R, Python, Stata) packages.
 
 ## References
 
-Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", Forthcoming at the Stata Journal.
+Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", The Stata Journal, in press.
 
 Chetty, Raj, Nathaniel Hendren, Patrick Kline, Emmanuel Saez "Where is the land of Opportunity? The Geography of Intergenerational Mobility in the United States" , The Quarterly Journal of Economics 129(4) (2014), 1553–1623, https://doi.org/10.1093/qje/qju022
 
-Müller, Ulrich K. and Mark W. Watson "Spatial Unit Roots and Spurious Regression", Econometrica 92(5) (2024), 1661–1695. https://www.princeton.edu/~umueller/SPUR.pdf.
+Müller, Ulrich K. and Mark W. Watson "Spatial Unit Roots and Spurious Regression", Econometrica 92(5) (2024), 1661–1695. doi:10.3982/ECTA21654.
