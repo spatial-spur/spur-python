@@ -9,7 +9,7 @@
 
 `spur-python` implements diagnostics and correction methods for spatial unit roots developed by Müller and Watson (2024) in Python.
 
-**Citation:** If you use this package, please cite [Becker et al. 2026](CITATION.cff) and [Müller & Watson 2024](CITATION.cff). See [CITATION.cff](CITATION.cff) for copyable citation metadata.
+**Citation:** If you use this package, please cite `bbv2026` and `mw2024`. See [CITATION.cff](CITATION.cff) for copyable citation metadata.
 
 If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 
@@ -98,7 +98,7 @@ Please refer to [the package documentation](https://spatial-spur.github.io/spur-
 
 ## References
 
-Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", The Stata Journal, forthcoming.
+Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", The Stata Journal, forthcoming. https://pauldavidboll.com/SPUR_Stata_Journal_website.pdf.
 
 Chetty, Raj, Nathaniel Hendren, Patrick Kline, Emmanuel Saez "Where is the land of Opportunity? The Geography of Intergenerational Mobility in the United States" , The Quarterly Journal of Economics 129(4) (2014), 1553–1623, https://doi.org/10.1093/qje/qju022
 
