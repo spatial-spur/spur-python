@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use spur-python, please cite bbv2026 and mw2024."
+message: "If you use spur-python, please cite Becker et al. 2026 and Müller & Watson 2024."
 title: "spur-python: A Python Package for Spatial Unit Roots"
 version: "0.1.1"
 license: MIT

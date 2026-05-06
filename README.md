@@ -7,9 +7,9 @@
 
 # spur-python
 
-`spur-python` implements diagnostics and correction methods for spatial unit roots developed by Müller and Watson (2024) in Python.
+`spur-python` implements diagnostics and correction methods for spatial unit roots developed by Müller & Watson 2024 in Python.
 
-**Citation:** If you use this package, please cite `bbv2026` and `mw2024`. See [CITATION.cff](CITATION.cff) for copyable citation metadata.
+**Citation:** If you use this package, please cite Becker et al. 2026 and Müller & Watson 2024. See [CITATION.bib](CITATION.bib) for the BibTeX entries.
 
 If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 
