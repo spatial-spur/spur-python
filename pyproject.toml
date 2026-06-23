@@ -40,7 +40,7 @@ dev = [
 ]
 
 [project.urls]
-Paper = "https://pauldavidboll.com/SPUR_Stata_Journal_website.pdf"
+Paper = "https://journals.sagepub.com/doi/10.1177/1536867X261449932"
 
 [build-system]
 requires = ["setuptools>=61"]
