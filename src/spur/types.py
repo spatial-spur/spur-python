@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 import numpy as np
 
@@ -20,6 +20,16 @@ class TestResult:
     """Reference critical values for the test."""
     ha_param: float
     """Estimated local-alternative tuning parameter."""
+    pvalue_mat: np.ndarray | None = field(default=None, repr=False, compare=False)
+    """Optional null-grid p-value vector/matrix when computed."""
+    cvalue_mat: np.ndarray | None = field(default=None, repr=False, compare=False)
+    """Optional null-grid critical-value matrix when computed."""
+    rho_grid: np.ndarray | None = field(default=None, repr=False, compare=False)
+    """Optional null-grid rho values when computed."""
+    backend: str = field(default="fallback", repr=False, compare=False)
+    """Execution backend used to compute this result."""
+    tied: bool = field(default=False, repr=False, compare=False)
+    """Whether the eigenspace cutoff exhibited numerical ties."""
 
     def summary(self) -> str:
         """Format test results for display."""
@@ -51,6 +61,14 @@ class HalfLifeResult:
     """Confidence level used for the interval."""
     normdist: bool
     """Whether distances were normalized before reporting."""
+    pv_mat: np.ndarray | None = field(default=None, repr=False, compare=False)
+    """Null half-life grid p-values when available."""
+    hl_grid: np.ndarray | None = field(default=None, repr=False, compare=False)
+    """Null half-life grid points in normalized units."""
+    backend: str = field(default="fallback", repr=False, compare=False)
+    """Execution backend used to compute this result."""
+    tied: bool = field(default=False, repr=False, compare=False)
+    """Whether the eigenspace cutoff exhibited numerical ties."""
 
     def summary(self) -> str:
         """Format results for display."""
@@ -109,6 +127,10 @@ class PipelineResult:
     """All diagnostic test results."""
     fits: Fits
     """Both fitted regression branches."""
+    backend: str = field(default="fallback", repr=False, compare=False)
+    """Execution backend used to compute the SPUR diagnostics and transform."""
+    tied: bool = field(default=False, repr=False, compare=False)
+    """Whether any SPUR eigenspace cutoff exhibited numerical ties."""
 
     def summary(self) -> str:
         """Format the full SPUR pipeline result for display."""
