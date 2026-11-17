@@ -5,6 +5,7 @@ from .dist import get_cbar
 from .matrix import (
     cholesky_upper,
     get_r,
+    validate_and_project_y,
     get_sigma_dm,
     get_sigma_residual,
 )
@@ -73,7 +74,7 @@ def get_ha_param_i1(
         pow_ = get_pow_qf(om_ho, om_c, e)
         ctry = ctry / 2
         _iter += 1
-        if _iter >= _MAX_BRACKET:
+        if _iter >= _MAX_BRACKET and pow_ > pow50:
             raise RuntimeError(
                 f"get_ha_param_i1: step-1 bracketing did not converge in {_MAX_BRACKET} iterations. "
                 "Power may be non-monotone for this dataset."
@@ -91,7 +92,7 @@ def get_ha_param_i1(
         pow_ = get_pow_qf(om_ho, om_c, e)
         ctry = 2 * ctry
         _iter += 1
-        if _iter >= _MAX_BRACKET:
+        if _iter >= _MAX_BRACKET and pow_ < pow50:
             raise RuntimeError(
                 f"get_ha_param_i1: step-2 bracketing did not converge in {_MAX_BRACKET} iterations. "
                 "Power may be non-monotone for this dataset."
@@ -134,7 +135,7 @@ def get_ha_param_i0(
         pow_ = get_pow_qf(om_ho, om_i0 + g * om_bm, e)
         gtry = g / 2
         _iter += 1
-        if _iter >= _MAX_BRACKET:
+        if _iter >= _MAX_BRACKET and pow_ > 0.5:
             raise RuntimeError(
                 f"get_ha_param_i0: step-1 bracketing did not converge in {_MAX_BRACKET} iterations."
             )
@@ -148,7 +149,7 @@ def get_ha_param_i0(
         pow_ = get_pow_qf(om_ho, om_i0 + g * om_bm, e)
         gtry = g * 2
         _iter += 1
-        if _iter >= _MAX_BRACKET:
+        if _iter >= _MAX_BRACKET and pow_ < 0.5:
             raise RuntimeError(
                 f"get_ha_param_i0: step-2 bracketing did not converge in {_MAX_BRACKET} iterations."
             )
@@ -190,7 +191,7 @@ def get_ha_param_i1_residual(
         pow_ = get_pow_qf(om_ho, om_c, e)
         ctry = ctry / 2
         _iter += 1
-        if _iter >= _MAX_BRACKET:
+        if _iter >= _MAX_BRACKET and pow_ > pow50:
             raise RuntimeError(
                 f"get_ha_param_i1_residual: step-1 bracketing did not converge in {_MAX_BRACKET} iterations."
             )
@@ -206,7 +207,7 @@ def get_ha_param_i1_residual(
         pow_ = get_pow_qf(om_ho, om_c, e)
         ctry = 2 * ctry
         _iter += 1
-        if _iter >= _MAX_BRACKET:
+        if _iter >= _MAX_BRACKET and pow_ < pow50:
             raise RuntimeError(
                 f"get_ha_param_i1_residual: step-2 bracketing did not converge in {_MAX_BRACKET} iterations."
             )
@@ -254,6 +255,8 @@ def c_ci(
 
     R = get_r(sigdm_bm, q)
 
+    reference_shape = None
+    informative = False
     ch_om_list = []
     ch_omi_list = []
     const_den_list = np.zeros(n_c_ho)
@@ -263,6 +266,11 @@ def c_ci(
         c = c_grid_ho[i]
         sigdm = get_sigma_dm(distmat, c)
         om = R.T @ sigdm @ R
+        shape = om / np.trace(om)
+        if reference_shape is None:
+            reference_shape = shape
+        elif np.max(np.abs(shape - reference_shape)) > 1e-12:
+            informative = True
         ch_om_list.append(cholesky_upper(om))
         omi = np.linalg.inv(om)
         ch_omi_list.append(cholesky_upper(omi))
@@ -275,11 +283,18 @@ def c_ci(
         c = c_grid_ha[i]
         sigdm = get_sigma_dm(distmat, c)
         om = R.T @ sigdm @ R
+        shape = om / np.trace(om)
+        if np.max(np.abs(shape - reference_shape)) > 1e-12:
+            informative = True
         omi = np.linalg.inv(om)
         ch_omi_ha_list.append(cholesky_upper(omi))
         const_den_ha_list[i] = np.sqrt(np.linalg.det(omi)) * const_factor
 
-    X = R.T @ Y
+    if not informative:
+        raise ValueError(
+            "Half-life experiment is uninformative: covariance shapes are proportional."
+        )
+    X = validate_and_project_y(Y, R)
     pv_mat = np.zeros(n_c_ho)
 
     for i in range(n_c_ho):

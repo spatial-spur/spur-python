@@ -151,7 +151,13 @@ def get_distance_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
 def normalized_distmat(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     """Get distance matrix normalized so max distance = 1."""
     distmat = get_distance_matrix(coords, latlon=latlon)
-    return distmat / distmat.max()
+    max_dist = float(distmat.max())
+    if not np.isfinite(max_dist) or max_dist <= 1e-10:
+        raise ValueError(
+            "All coordinates are identical (or nearly so); distance normalization "
+            "requires distinct locations."
+        )
+    return distmat / max_dist
 
 
 def lvech(S: np.ndarray) -> np.ndarray:

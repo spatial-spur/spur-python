@@ -26,6 +26,10 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
     """
     Get the top qmax eigenvectors of covariance matrix (sorted by eigenvalue desc).
 
+    Canonicalizes each eigenvector's sign so its largest-magnitude entry is
+    non-negative (earliest index breaks exact ties), and verifies that the
+    retained basis has positive covariance rank.
+
     Parameters
     ----------
     sigma : ndarray (n, n)
@@ -38,10 +42,136 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
     ndarray (n, qmax)
         Matrix of top eigenvectors
     """
-    eigenvalues, eigenvectors = np.linalg.eigh(sigma)
+    sigma_arr = np.asarray(sigma, dtype=float)
+    if sigma_arr.ndim != 2 or sigma_arr.shape[0] != sigma_arr.shape[1]:
+        raise ValueError("`sigma` must be a square 2D matrix.")
+    n = sigma_arr.shape[0]
+    if qmax < 1 or qmax > n:
+        raise ValueError(f"q={qmax} must satisfy 1 <= q <= n={n}.")
+
+    sigma_sym = 0.5 * (sigma_arr + sigma_arr.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(sigma_sym)
     idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
     eigenvectors = eigenvectors[:, idx]
-    return eigenvectors[:, :qmax]
+
+    lead = float(eigenvalues[0])
+    tail = float(eigenvalues[qmax - 1])
+    if (
+        not np.isfinite(lead)
+        or lead <= 0.0
+        or not np.isfinite(tail)
+        or tail <= 1e-12 * lead
+    ):
+        raise ValueError(
+            "SPUR covariance basis has insufficient positive rank for requested q."
+        )
+
+    R = eigenvectors[:, :qmax].copy()
+    for j in range(R.shape[1]):
+        col = R[:, j]
+        max_idx = int(np.argmax(np.abs(col)))
+        if col[max_idx] < 0.0:
+            col *= -1.0
+    return R
+
+
+def orthonormal_design_basis(x_in: np.ndarray, tol: float = 1e-10) -> np.ndarray:
+    """
+    Construct an orthonormal basis Q_x for the column space of X_in.
+
+    Column-normalizes each regressor column safely by its L2 norm first so that
+    both rank detection and residual projection M = I - Q_x @ Q_x.T are invariant
+    to arbitrary positive column rescaling, then applies twice-reorthogonalized
+    modified Gram-Schmidt.
+    """
+    x_arr = np.asarray(x_in, dtype=float)
+    if x_arr.ndim != 2:
+        raise ValueError("Regressor matrix X must be 2-dimensional.")
+    n, k_x = x_arr.shape
+    if k_x < 1 or k_x >= n:
+        raise ValueError(
+            f"Invalid residual test design matrix dimensions ({n}, {k_x}): "
+            "must satisfy 1 <= k_x < n."
+        )
+    if not np.all(np.isfinite(x_arr)):
+        raise ValueError(
+            "Regressor matrix X contains NaN or inf values. All values must be finite."
+        )
+
+    q_mat = np.empty((n, k_x), dtype=float)
+    for j in range(k_x):
+        col = x_arr[:, j]
+        max_abs = float(np.max(np.abs(col)))
+        if not np.isfinite(max_abs) or max_abs == 0.0:
+            raise ValueError(
+                "Regressor matrix X is rank-deficient (collinear regressors or dummy trap). "
+                "Check for zero columns, perfectly collinear columns, or a full set of category dummies."
+            )
+        scaled = col / max_abs
+        scaled_norm = float(np.linalg.norm(scaled))
+        if not np.isfinite(scaled_norm) or scaled_norm == 0.0:
+            raise ValueError(
+                "Regressor matrix X is rank-deficient (collinear regressors or dummy trap). "
+                "Check for zero columns, perfectly collinear columns, or a full set of category dummies."
+            )
+        q_mat[:, j] = scaled / scaled_norm
+
+    for j in range(k_x):
+        col = q_mat[:, j]
+        for _ in range(2):
+            for prev in range(j):
+                prev_col = q_mat[:, prev]
+                col -= float(np.dot(prev_col, col)) * prev_col
+        norm = float(np.linalg.norm(col))
+        if not np.isfinite(norm) or norm <= tol:
+            raise ValueError(
+                "Regressor matrix X is rank-deficient (collinear regressors or dummy trap). "
+                "Check for perfectly collinear columns or a full set of category dummies."
+            )
+        col /= norm
+
+    return q_mat
+
+
+def validate_y_variation(y: np.ndarray) -> np.ndarray:
+    """Validate response vector is finite and non-constant, returning demeaned values."""
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    if y_arr.size == 0 or not np.all(np.isfinite(y_arr)):
+        raise ValueError(
+            "Response Y contains NaN or inf values. All values must be finite."
+        )
+    if float(np.ptp(y_arr)) == 0.0:
+        raise ValueError(
+            "Response Y has zero variation; SPUR inference requires non-constant Y."
+        )
+    y_dm = y_arr - float(np.mean(y_arr))
+    max_d = float(np.max(np.abs(y_dm)))
+    if not np.isfinite(max_d) or max_d == 0.0:
+        raise ValueError(
+            "Response Y is effectively constant; SPUR inference requires variation in Y."
+        )
+    return y_dm
+
+
+def validate_and_project_y(y: np.ndarray, basis_r: np.ndarray) -> np.ndarray:
+    """Validate response variation and project demeaned Y onto SPUR basis R."""
+    y_dm = validate_y_variation(y)
+    max_d = float(np.max(np.abs(y_dm)))
+    y_dm = y_dm / max_d
+    y_dm_norm = float(np.linalg.norm(y_dm))
+    p_vec = basis_r.T @ y_dm
+    p_max = float(np.max(np.abs(p_vec)))
+    if not np.isfinite(p_max) or p_max == 0.0:
+        raise ValueError(
+            "Projected SPUR vector R'Y has zero norm; response has no variation in the SPUR basis."
+        )
+    p_norm = p_max * float(np.linalg.norm(p_vec / p_max))
+    if not np.isfinite(p_norm) or p_norm <= 1e-12 * y_dm_norm:
+        raise ValueError(
+            "Projected SPUR vector R'Y has zero norm; response has negligible variation in the SPUR basis."
+        )
+    return p_vec
 
 
 def cholesky_upper(M: np.ndarray) -> np.ndarray:

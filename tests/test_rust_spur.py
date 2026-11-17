@@ -10,14 +10,6 @@ import pytest
 
 import spur
 import spur.core as spur_core
-from spur.utils.dist import get_cbar, normalized_distmat
-from spur.utils.matrix import (
-    demean_matrix,
-    get_r,
-    get_sigma_dm,
-    get_sigma_lbm,
-    get_sigma_residual,
-)
 
 BENCH_200 = (
     Path(__file__).resolve().parents[2] / "verification" / "data" / "bench_200.csv"
@@ -26,42 +18,6 @@ BENCH_200 = (
 
 def _load_bench_df() -> pd.DataFrame:
     return pd.read_csv(BENCH_200)
-
-
-def _sign_alignment(r_ref: np.ndarray) -> np.ndarray:
-    """Return +1/-1 column signs matching spatial-core's canonical eigenvector sign rule."""
-    signs = np.ones(r_ref.shape[1], dtype=float)
-    for j in range(r_ref.shape[1]):
-        idx = int(np.argmax(np.abs(r_ref[:, j])))
-        if r_ref[idx, j] < 0.0:
-            signs[j] = -1.0
-    return signs
-
-
-def _aligned_emat_pair(
-    emat: np.ndarray,
-    coords: np.ndarray,
-    *,
-    latlong: bool,
-    q: int,
-    kind: str,
-    x_in: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Adjust fallback vs Rust emat row signs to neutralize eigenvector sign ambiguity."""
-    distmat = normalized_distmat(coords, latlon=latlong)
-    if kind == "lbm":
-        sig = demean_matrix(get_sigma_lbm(distmat))
-    elif kind == "resid":
-        assert x_in is not None
-        m_mat = np.eye(len(distmat)) - x_in @ np.linalg.solve(x_in.T @ x_in, x_in.T)
-        sig = get_sigma_residual(distmat, get_cbar(0.999, distmat), m_mat)
-    elif kind == "hl":
-        sig = get_sigma_dm(distmat, get_cbar(0.999, distmat))
-    else:
-        raise ValueError(kind)
-    r_fb = get_r(sig, q)
-    signs = _sign_alignment(r_fb)
-    return emat, emat * signs[:, None]
 
 
 def test_spur_diagnostics_frozen_emat_parity_geodesic_and_euclidean(
@@ -73,18 +29,9 @@ def test_spur_diagnostics_frozen_emat_parity_geodesic_and_euclidean(
     rng = np.random.default_rng(11)
     base_emat = rng.standard_normal((q, nrep))
 
-    x_in = np.column_stack([np.ones(len(df)), df["x1"].to_numpy(), df["x2"].to_numpy()])
-    configs: list[tuple[bool, str | None, str | None, list[str] | None, np.ndarray]] = [
-        (True, "s_1", "s_2", None, df[["s_2", "s_1"]].to_numpy()),
-        (False, None, None, ["s_1", "s_2"], df[["s_1", "s_2"]].to_numpy()),
-    ]
-    for latlong, lon_c, lat_c, euc_c, coords_mat in configs:
-        e_lbm_fb, e_lbm_ru = _aligned_emat_pair(
-            base_emat, coords_mat, latlong=latlong, q=q, kind="lbm"
-        )
-        e_res_fb, e_res_ru = _aligned_emat_pair(
-            base_emat, coords_mat, latlong=latlong, q=q, kind="resid", x_in=x_in
-        )
+    configs = [("s_1", "s_2", None), (None, None, ["s_1", "s_2"])]
+    for lon_c, lat_c, euc_c in configs:
+        e_lbm_fb = e_lbm_ru = e_res_fb = e_res_ru = base_emat
 
         # I(0) and I(1)
         for test_name, fn in [("i0", spur.spurtest_i0), ("i1", spur.spurtest_i1)]:
@@ -196,16 +143,9 @@ def test_spur_halflife_frozen_emat_parity_and_invariants(
     nrep = 200
     base_emat = np.random.default_rng(77).standard_normal((q, nrep))
 
-    hl_configs: list[
-        tuple[bool, str | None, str | None, list[str] | None, np.ndarray]
-    ] = [
-        (True, "s_1", "s_2", None, df[["s_2", "s_1"]].to_numpy()),
-        (False, None, None, ["s_1", "s_2"], df[["s_1", "s_2"]].to_numpy()),
-    ]
-    for latlong, lon_c, lat_c, euc_c, coords_mat in hl_configs:
-        e_fb, e_ru = _aligned_emat_pair(
-            base_emat, coords_mat, latlong=latlong, q=q, kind="hl"
-        )
+    hl_configs = [("s_1", "s_2", None), (None, None, ["s_1", "s_2"])]
+    for lon_c, lat_c, euc_c in hl_configs:
+        e_fb = e_ru = base_emat
         for normdist in (False, True):
             monkeypatch.setattr(spur_core, "_draw_emat", lambda _s, _q, _n, e=e_fb: e)
             fb = spur.spurhalflife(
@@ -369,7 +309,7 @@ def test_spur_pipeline_parity_and_thread_invariance() -> None:
 
 
 def test_tied_eigenspace_triggers_auto_fallback_and_keeps_rust_explicit() -> None:
-    # A regular 16-gon has degenerate 2D cos/sin eigenspaces across odd q=1, 3, ... (and even q=2 for LBM).
+    # A regular 16-gon has tied cosine/sine eigenspaces.
     k = np.arange(16)
     df = pd.DataFrame(
         {
@@ -382,8 +322,8 @@ def test_tied_eigenspace_triggers_auto_fallback_and_keeps_rust_explicit() -> Non
         "y",
         df,
         coords_euclidean=["x_c", "y_c"],
-        q=2,
-        nrep=500,
+        q=8,
+        nrep=2000,
         seed=42,
         backend="rust",
     )
@@ -391,8 +331,8 @@ def test_tied_eigenspace_triggers_auto_fallback_and_keeps_rust_explicit() -> Non
         "y",
         df,
         coords_euclidean=["x_c", "y_c"],
-        q=2,
-        nrep=500,
+        q=8,
+        nrep=2000,
         seed=42,
         backend="auto",
     )

@@ -103,3 +103,17 @@ Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting f
 Chetty, Raj, Nathaniel Hendren, Patrick Kline, Emmanuel Saez "Where is the land of Opportunity? The Geography of Intergenerational Mobility in the United States" , The Quarterly Journal of Economics 129(4) (2014), 1553–1623, https://doi.org/10.1093/qje/qju022
 
 Müller, Ulrich K. and Mark W. Watson "Spatial Unit Roots and Spurious Regression", Econometrica 92(5) (2024), 1661–1695. doi:10.3982/ECTA21654.
+
+SPUR inference requires at least two retained directions (`q >= 2`). Residual
+tests also require `q` not to exceed the residual degrees of freedom and the
+retained covariance to have positive rank. Experiments with no projected outcome
+variation or no covariance-shape information raise `ValueError`. Eigenvector
+signs are normalized consistently across backends, so seeded Monte Carlo results
+are reproducible across the native and fallback implementations. This sign
+convention can change the finite simulation result from earlier releases.
+Half-life distances use metres for geographic coordinates and the supplied
+coordinate units for Euclidean coordinates.
+The optional native backend for these SPUR calculations requires SPUR API 2
+(`spatial-spur-rust` 0.2.2 or later). Older extensions use the fallback in
+`auto` mode; explicitly requesting Rust raises an error. A package extra can be
+added after the compatible wheel is published and the lockfile refreshed.

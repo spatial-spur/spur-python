@@ -48,13 +48,39 @@ from .utils.matrix import (
     iso_matrix,
     lbmgls_matrix,
     nn_matrix,
+    orthonormal_design_basis,
+    validate_and_project_y,
+    validate_y_variation,
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 5
-SPUR_RUST_API_VERSION = 1
+SPUR_RUST_API_VERSION = 2
 EARTH_RADIUS_M = 6_371_000.0
 EARTH_CIRCUMFERENCE_M = 2.0 * math.pi * EARTH_RADIUS_M
+
+
+def _different_covariance_shapes(a: np.ndarray, b: np.ndarray) -> bool:
+    return bool(np.max(np.abs(a / np.trace(a) - b / np.trace(b))) > 1e-12)
+
+
+def _validate_i1_shapes(
+    distmat: np.ndarray, r: np.ndarray, m: np.ndarray | None = None
+) -> None:
+    def omega(rho: float) -> np.ndarray:
+        c = get_cbar(rho, distmat)
+        sigma = (
+            get_sigma_dm(distmat, c) if m is None else get_sigma_residual(distmat, c, m)
+        )
+        return r.T @ sigma @ r
+
+    lo, mid, hi = (omega(rho) for rho in (0.01, 0.5, 0.95))
+    if not _different_covariance_shapes(lo, mid) and not _different_covariance_shapes(
+        lo, hi
+    ):
+        raise ValueError(
+            "SPUR experiment is uninformative: covariance shapes are proportional."
+        )
 
 
 def resolve_backend(backend: object) -> str:
@@ -283,8 +309,8 @@ def spurtest_i1(
     n = coords.shape[0]
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 1:
-        raise ValueError(f"q={q} must be >= 1.")
+    if q < 2:
+        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
     if nrep < 1:
         raise ValueError(f"nrep={nrep} must be >= 1.")
 
@@ -309,8 +335,10 @@ def spurtest_i1(
 
     sigdm_bm = demean_matrix(get_sigma_lbm(distmat))
     R = get_r(sigdm_bm, q)
+    P = validate_and_project_y(Y, R)
     om_ho = R.T @ sigdm_bm @ R
 
+    _validate_i1_shapes(distmat, R)
     ha_parm = get_ha_param_i1(om_ho, distmat, R, emat)
     sigdm_ha = get_sigma_dm(distmat, ha_parm)
     om_ha = R.T @ sigdm_ha @ R
@@ -331,8 +359,6 @@ def spurtest_i1(
     sz_vec = np.array([0.01, 0.05, 0.10])
     cv_vec = np.quantile(lr_ho, 1 - sz_vec)
 
-    X = Y - np.mean(Y)
-    P = R.T @ X
     LR = float((P.T @ omi_ho @ P) / (P.T @ omi_ha @ P))
     pvalue = float(np.mean(lr_ho > LR))
 
@@ -422,8 +448,8 @@ def spurtest_i0(
     n = coords.shape[0]
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 1:
-        raise ValueError(f"q={q} must be >= 1.")
+    if q < 2:
+        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
     if nrep < 1:
         raise ValueError(f"nrep={nrep} must be >= 1.")
 
@@ -448,6 +474,7 @@ def spurtest_i0(
 
     sigdm_bm = demean_matrix(get_sigma_lbm(distmat))
     R = get_r(sigdm_bm, q)
+    P = validate_and_project_y(Y, R)
 
     rho = 0.001
     c = get_cbar(rho, distmat)
@@ -455,6 +482,10 @@ def spurtest_i0(
 
     om_rho = R.T @ sigdm_rho @ R
     om_bm = R.T @ sigdm_bm @ R
+    if not _different_covariance_shapes(om_rho, om_bm):
+        raise ValueError(
+            "SPUR experiment is uninformative: covariance shapes are proportional."
+        )
 
     om_i0 = om_rho
     om_ho = om_rho
@@ -464,8 +495,6 @@ def spurtest_i0(
     ch_omi_ho = cholesky_upper(np.linalg.inv(om_ho))
     ch_omi_ha = cholesky_upper(np.linalg.inv(om_ha))
 
-    X = Y - np.mean(Y)
-    P = R.T @ X
     y_P_ho = ch_omi_ho @ P
     y_P_ha = ch_omi_ha @ P
     q_P_ho = np.sum(y_P_ho**2)
@@ -595,21 +624,20 @@ def spurtest_i1resid(
     n = coords.shape[0]
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 1:
-        raise ValueError(f"q={q} must be >= 1.")
+    if q < 2:
+        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
     if nrep < 1:
         raise ValueError(f"nrep={nrep} must be >= 1.")
 
     Y = parsed["Y"].reshape(-1)
     X_in = parsed["X_in"]
+    design_basis = orthonormal_design_basis(X_in)
+    if q > n - design_basis.shape[1]:
+        raise ValueError(
+            f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
+        )
     emat = _draw_emat(seed, q, nrep)
     q = emat.shape[0]
-
-    if np.linalg.matrix_rank(X_in) < X_in.shape[1]:
-        raise ValueError(
-            "Regressor matrix X is rank-deficient (collinear regressors or dummy trap). "
-            "Check for perfectly collinear columns or a full set of category dummies."
-        )
 
     rust_res, tied_from_rust = _try_rust_spur_test(
         "i1resid",
@@ -627,16 +655,17 @@ def spurtest_i1resid(
         return rust_res
 
     distmat = normalized_distmat(coords, latlon=latlong)
-    XtX_inv = np.linalg.inv(X_in.T @ X_in)
-    M = np.eye(n) - X_in @ XtX_inv @ X_in.T
+    M = np.eye(n) - design_basis @ design_basis.T
 
     rho_bm = 0.999
     c_bm = get_cbar(rho_bm, distmat)
     sigdm_bm = get_sigma_residual(distmat, c_bm, M)
 
     R = get_r(sigdm_bm, q)
+    P = validate_and_project_y(Y, R)
     om_ho = R.T @ sigdm_bm @ R
 
+    _validate_i1_shapes(distmat, R, M)
     ha_parm = get_ha_param_i1_residual(om_ho, distmat, R, emat, M)
     sigdm_ha = get_sigma_residual(distmat, ha_parm, M)
     om_ha = R.T @ sigdm_ha @ R
@@ -657,8 +686,6 @@ def spurtest_i1resid(
     sz_vec = np.array([0.01, 0.05, 0.10])
     cv_vec = np.quantile(lr_ho, 1 - sz_vec)
 
-    X = Y - np.mean(Y)
-    P = R.T @ X
     LR = float((P.T @ omi_ho @ P) / (P.T @ omi_ha @ P))
     pvalue = float(np.mean(lr_ho > LR))
 
@@ -748,21 +775,20 @@ def spurtest_i0resid(
     n = coords.shape[0]
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 1:
-        raise ValueError(f"q={q} must be >= 1.")
+    if q < 2:
+        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
     if nrep < 1:
         raise ValueError(f"nrep={nrep} must be >= 1.")
 
     Y = parsed["Y"].reshape(-1)
     X_in = parsed["X_in"]
+    design_basis = orthonormal_design_basis(X_in)
+    if q > n - design_basis.shape[1]:
+        raise ValueError(
+            f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
+        )
     emat = _draw_emat(seed, q, nrep)
     q = emat.shape[0]
-
-    if np.linalg.matrix_rank(X_in) < X_in.shape[1]:
-        raise ValueError(
-            "Regressor matrix X is rank-deficient (collinear regressors or dummy trap). "
-            "Check for perfectly collinear columns or a full set of category dummies."
-        )
 
     rust_res, tied_from_rust = _try_rust_spur_test(
         "i0resid",
@@ -780,14 +806,14 @@ def spurtest_i0resid(
         return rust_res
 
     distmat = normalized_distmat(coords, latlon=latlong)
-    XtX_inv = np.linalg.inv(X_in.T @ X_in)
-    M = np.eye(n) - X_in @ XtX_inv @ X_in.T
+    M = np.eye(n) - design_basis @ design_basis.T
 
     rho_bm = 0.999
     c_bm = get_cbar(rho_bm, distmat)
     sigdm_bm = get_sigma_residual(distmat, c_bm, M)
 
     R = get_r(sigdm_bm, q)
+    P = validate_and_project_y(Y, R)
 
     rho = 0.001
     c = get_cbar(rho, distmat)
@@ -795,6 +821,10 @@ def spurtest_i0resid(
 
     om_rho = R.T @ sigdm_rho @ R
     om_bm = R.T @ sigdm_bm @ R
+    if not _different_covariance_shapes(om_rho, om_bm):
+        raise ValueError(
+            "SPUR experiment is uninformative: covariance shapes are proportional."
+        )
 
     om_i0 = om_rho
     om_ho = om_rho
@@ -804,8 +834,6 @@ def spurtest_i0resid(
     ch_omi_ho = cholesky_upper(np.linalg.inv(om_ho))
     ch_omi_ha = cholesky_upper(np.linalg.inv(om_ha))
 
-    X = Y - np.mean(Y)
-    P = R.T @ X
     y_P_ho = ch_omi_ho @ P
     y_P_ha = ch_omi_ha @ P
     q_P_ho = np.sum(y_P_ho**2)
@@ -1208,8 +1236,8 @@ def spurhalflife(
         raise ValueError(f"Variable '{var}' not found in data.")
     if not (0 < level < 100):
         raise ValueError(f"level={level} must be strictly between 0 and 100.")
-    if q < 1:
-        raise ValueError(f"q={q} must be >= 1.")
+    if q < 2:
+        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
     if nrep < 1:
         raise ValueError(f"nrep={nrep} must be >= 1.")
 
@@ -1234,7 +1262,7 @@ def spurhalflife(
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
 
-    Y = Y - Y.mean()
+    Y = validate_y_variation(Y)
     emat = _draw_emat(seed, q, nrep)
 
     tied_from_rust = False
@@ -1417,15 +1445,15 @@ def spur(
             n = coords.shape[0]
             if q >= n:
                 raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-            if q < 1:
-                raise ValueError(f"q={q} must be >= 1.")
+            if q < 2:
+                raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
             if nrep < 1:
                 raise ValueError(f"nrep={nrep} must be >= 1.")
             X_in = parsed_resid["X_in"]
-            if np.linalg.matrix_rank(X_in) < X_in.shape[1]:
+            design_basis = orthonormal_design_basis(X_in)
+            if q > n - design_basis.shape[1]:
                 raise ValueError(
-                    "Regressor matrix X is rank-deficient (collinear regressors or dummy trap). "
-                    "Check for perfectly collinear columns or a full set of category dummies."
+                    f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
                 )
             if coords.shape[1] == 2:
                 emat = _draw_emat(seed, q, nrep)
