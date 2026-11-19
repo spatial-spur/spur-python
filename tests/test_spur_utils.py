@@ -65,6 +65,23 @@ def test_parse_residual_formula_builds_y_and_x(sample_df: pd.DataFrame) -> None:
     assert parsed["use_rows"].tolist() == [True, True, True, True]
 
 
+def test_parse_residual_formula_evaluates_interactions_and_no_intercept() -> None:
+    df = pd.DataFrame(
+        {
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "x": [1.0, 2.0, np.nan, 4.0],
+            "g": ["a", "b", "a", "b"],
+        },
+        index=[0, 0, 0, 1],
+    )
+    parsed = parse_residual_formula(
+        "np.log(y) ~ 0 + C(g):x", df, fn_name="spurtest_i0resid()"
+    )
+    np.testing.assert_array_equal(parsed["use_rows"], [True, True, False, True])
+    np.testing.assert_allclose(parsed["Y"].ravel(), np.log([1.0, 2.0, 4.0]))
+    np.testing.assert_allclose(parsed["X_in"], [[1, 0], [0, 2], [0, 4]])
+
+
 def test_parse_residual_formula_handles_intercept_only(sample_df: pd.DataFrame) -> None:
     parsed = parse_residual_formula("am ~ 1", sample_df, fn_name="spurtest_i1resid()")
 
@@ -107,7 +124,7 @@ def test_parse_transform_formula_collects_all_variables(
     out = capsys.readouterr().out
 
     assert vars_ == ["am", "x", "z"]
-    assert "[formula-parser] y = am, covars (selection) = ['x', 'z']" in out
+    assert out == ""
 
 
 def test_parse_transform_formula_handles_single_variable_case(

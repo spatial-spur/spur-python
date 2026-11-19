@@ -27,7 +27,7 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
     Get the top qmax eigenvectors of covariance matrix (sorted by eigenvalue desc).
 
     Canonicalizes each eigenvector's sign so its largest-magnitude entry is
-    non-negative (earliest index breaks exact ties), and verifies that the
+    non-negative (earliest index breaks numerical ties), and verifies that the
     retained basis has positive covariance rank.
 
     Parameters
@@ -70,8 +70,11 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
     R = eigenvectors[:, :qmax].copy()
     for j in range(R.shape[1]):
         col = R[:, j]
-        max_idx = int(np.argmax(np.abs(col)))
-        if col[max_idx] < 0.0:
+        magnitude = np.abs(col)
+        maximum = np.max(magnitude)
+        tie_tolerance = 64 * np.finfo(float).eps * maximum
+        first = np.flatnonzero(maximum - magnitude <= tie_tolerance)[0]
+        if col[first] < 0.0:
             col *= -1.0
     return R
 
@@ -364,9 +367,7 @@ def lbmgls_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     eigenvalues = eigenvalues[mask]
     eigenvectors = eigenvectors[:, mask]
     dsi = 1.0 / np.sqrt(eigenvalues)
-    LBMGLS_mat = eigenvectors @ np.diag(dsi) @ eigenvectors.T
-
-    return LBMGLS_mat
+    return (eigenvectors * dsi) @ eigenvectors.T
 
 
 def cluster_matrix(cluster: np.ndarray) -> np.ndarray:

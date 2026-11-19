@@ -31,6 +31,9 @@ class TestResult:
     tied: bool = field(default=False, repr=False, compare=False)
     """Whether the eigenspace cutoff exhibited numerical ties."""
 
+    fallback_reason: str | None = field(default=None, repr=False, compare=False)
+    """Reason an automatically selected native diagnostic used the fallback."""
+
     def summary(self) -> str:
         """Format test results for display."""
         stat_name = "LFUR" if self.test_type.startswith("i1") else "LFST"
@@ -70,16 +73,20 @@ class HalfLifeResult:
     tied: bool = field(default=False, repr=False, compare=False)
     """Whether the eigenspace cutoff exhibited numerical ties."""
 
+    distance_units: str = "meters"
+    """Units of max_dist and, when normdist is false, of the interval bounds."""
+    fallback_reason: str | None = field(default=None, repr=False, compare=False)
+    """Reason an automatically selected native calculation used the fallback."""
+
     def summary(self) -> str:
         """Format results for display."""
-        units = "fractions of max distance" if self.normdist else "meters"
-        upper_str = "inf" if np.isinf(self.ci_upper) else f"{self.ci_upper:.4f}"
+        units = "fractions of max distance" if self.normdist else self.distance_units
         lines = [
             f"Spatial half-life {self.level:g}% confidence interval ({units})",
             "-" * 45,
-            f"Lower bound: {self.ci_lower:.4f}",
-            f"Upper bound: {upper_str}",
-            f"Max distance in sample: {self.max_dist:.4f}",
+            f"Lower bound: {self.ci_lower:.6g}",
+            f"Upper bound: {self.ci_upper:.6g}",
+            f"Max distance in sample: {self.max_dist:.6g} {self.distance_units}",
             "-" * 45,
         ]
         return "\n".join(lines)
@@ -107,6 +114,10 @@ class RegressionResult:
     """Fitted regression model for this branch."""
     scpc: Any
     """SCPC output computed from that fitted model."""
+    coefficient_labels: tuple[str, ...] | None = field(
+        default=None, repr=False, compare=False
+    )
+    """Optional labels matching the original evaluated regression design."""
 
 
 @dataclass(slots=True)
@@ -128,9 +139,14 @@ class PipelineResult:
     fits: Fits
     """Both fitted regression branches."""
     backend: str = field(default="fallback", repr=False, compare=False)
-    """Execution backend used to compute the SPUR diagnostics and transform."""
+    """Rust if every stage used Rust, otherwise fallback."""
     tied: bool = field(default=False, repr=False, compare=False)
-    """Whether any SPUR eigenspace cutoff exhibited numerical ties."""
+    """Whether any SPUR diagnostic or SCPC fit detected eigenspace ties."""
+
+    stage_backends: dict[str, str] = field(default_factory=dict)
+    """Actual backend of each diagnostic, the transform and each SCPC fit."""
+    fallback_reasons: dict[str, str] = field(default_factory=dict)
+    """Reasons automatic dispatch used a stage's fallback."""
 
     def summary(self) -> str:
         """Format the full SPUR pipeline result for display."""

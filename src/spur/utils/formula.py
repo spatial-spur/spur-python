@@ -1,6 +1,9 @@
 from __future__ import annotations
 import numpy as np
 import pandas as pd
+from patsy import PatsyError
+from patsy.desc import ModelDesc
+from patsy.highlevel import dmatrices, dmatrix
 
 
 def parse_single_var_formula(formula: str, data: pd.DataFrame, fn_name: str) -> dict:
@@ -42,37 +45,44 @@ def parse_residual_formula(formula: str, data: pd.DataFrame, fn_name: str) -> di
             f"`formula` for {fn_name} must be two-sided, e.g. `y ~ x1 + x2`."
         )
 
-    lhs, rhs = [part.strip() for part in formula.split("~", 1)]
-    assert lhs, (
-        f"`formula` for {fn_name} must have a dependent variable on the left-hand side."
-    )
+    y, x = evaluate_formula(formula, data)
+    if y.shape[1] != 1 or not getattr(y, "design_info").terms[0].factors:
+        raise ValueError(f"`formula` for {fn_name} must have one numeric response.")
+    return {
+        "Y": y.to_numpy(dtype=float),
+        "X_in": x.to_numpy(dtype=float),
+        "use_rows": np.isin(np.arange(len(data)), x.index),
+    }
 
-    rhs_terms = [] if rhs in ("", "1") else [term.strip() for term in rhs.split("+")]
-    if any(not term for term in rhs_terms):
-        raise ValueError(f"`formula` for {fn_name} is invalid.")
-    print(f"[formula-parser] y = {lhs}, covars (selection) = {rhs_terms[:5]}")
 
-    needed = [lhs] + rhs_terms
-    missing = [name for name in needed if name not in data.columns]
-    assert not missing, f"Variables not found in data: {', '.join(missing)}"
+def evaluate_formula(
+    formula: str, data: pd.DataFrame, *, allow_no_response: bool = False
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Evaluate formula terms once and retain input row positions."""
+    if not isinstance(formula, str) or "~" not in formula:
+        raise ValueError("`formula` must contain `~`, e.g. `y ~ x1 + x2`.")
 
-    frame = data[needed]
-    use_rows = frame.notna().all(axis=1).to_numpy()
-    assert use_rows.any(), f"No observations with complete data for {fn_name}."
-    y = data.loc[use_rows, lhs].to_numpy(dtype=float).reshape(-1, 1)
+    # A fresh index preserves exact row positions with duplicate data labels.
+    frame = data.reset_index(drop=True)
+    try:
+        desc = ModelDesc.from_formula(formula)
+        if allow_no_response:
+            desc.lhs_termlist = [term for term in desc.lhs_termlist if term.factors]
+        if not desc.lhs_termlist and allow_no_response:
+            x = dmatrix(desc, frame, return_type="dataframe")
+            y = pd.DataFrame(index=x.index)
+        else:
+            y, x = dmatrices(desc, frame, return_type="dataframe")
+    except PatsyError as error:
+        if isinstance(error.__cause__, NameError):
+            raise AssertionError(f"Variable not found in data: {error}") from error
+        raise ValueError(f"Invalid formula: {error}") from error
 
-    x_cols = []
-    for term in rhs_terms:
-        col = data.loc[use_rows, term].to_numpy(dtype=float).reshape(-1, 1)
-        x_cols.append(col)
-
-    if x_cols:
-        X = np.column_stack(x_cols)
-        X_in = np.column_stack([np.ones(len(y)), X])
-    else:
-        X_in = np.ones((len(y), 1))
-
-    return {"Y": y, "X_in": X_in, "use_rows": use_rows}
+    if len(x) == 0:
+        raise ValueError("No observations with complete data for the formula.")
+    if not np.isfinite(y.to_numpy()).all() or not np.isfinite(x.to_numpy()).all():
+        raise ValueError("The evaluated design and response must be finite.")
+    return y, x
 
 
 def parse_transform_formula(formula: str, data: pd.DataFrame) -> list[str]:
@@ -94,8 +104,6 @@ def parse_transform_formula(formula: str, data: pd.DataFrame) -> list[str]:
         vars.extend(rhs_terms)
     else:
         rhs_terms = []
-
-    print(f"[formula-parser] y = {lhs}, covars (selection) = {rhs_terms[:5]}")
 
     vars = list(dict.fromkeys(vars))
     assert vars, "No variables found in `formula`."

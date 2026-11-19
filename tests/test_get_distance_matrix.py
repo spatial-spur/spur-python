@@ -58,3 +58,10 @@ def test_get_distance_matrix_large_euclidean_problem_does_not_hit_haversine_guar
 
     assert called["args"] == ((10_001, 2), (10_001, 2), "euclidean")
     assert distmat is sentinel
+
+
+@pytest.mark.parametrize("scale", [1e-200, 1e200])
+def test_euclidean_distances_do_not_square_extreme_units(scale: float) -> None:
+    coords = scale * np.array([[0.0, 0.0], [3.0, 4.0], [3.0, 0.0]])
+    expected = np.array([[0, 5, 3], [5, 0, 4], [3, 4, 0]])
+    npt.assert_allclose(get_distance_matrix(coords, latlon=False) / scale, expected)

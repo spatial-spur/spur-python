@@ -113,7 +113,31 @@ are reproducible across the native and fallback implementations. This sign
 convention can change the finite simulation result from earlier releases.
 Half-life distances use metres for geographic coordinates and the supplied
 coordinate units for Euclidean coordinates.
-The optional native backend for these SPUR calculations requires SPUR API 2
-(`spatial-spur-rust` 0.2.2 or later). Older extensions use the fallback in
-`auto` mode; explicitly requesting Rust raises an error. A package extra can be
-added after the compatible wheel is published and the lockfile refreshed.
+Use `backend="auto"` (the default), `"rust"`, or `"fallback"` to select
+execution. `SPATIAL_BACKEND` applies when you omit the argument.
+Set `nthreads=1` for single-threaded Rust execution. For process-based
+parallelism after native threads have been used, start workers with
+`spawn` or `forkserver`.
+
+`spur()` evaluates the formula once and runs all diagnostics and both fits on
+the same complete-case sample. It applies the LBM-GLS transform to the evaluated
+outcome and each non-intercept design column. The result reports the actual
+backend of each calculation in `stage_backends` and explains automatic changes
+in `fallback_reasons`. Use `y ~ C(region)` with an intercept. A full set of
+category indicators in `y ~ 0 + C(region)` spans a constant, which LBM-GLS
+removes and leaves the transformed coefficients unidentified.
+
+The residual tests and `spurtransform()` accept evaluated terms such as
+`np.log(y) ~ x * C(region)`. `spurtransform()` names the appended columns using
+the prefix and evaluated column names. Rows excluded by the formula have missing
+values in those columns. `spurhalflife()` also reports `fallback_reason` when
+automatic dispatch uses the Python implementation.
+
+The Rust backend in this development branch requires SPUR API 3 and SCPC API 6
+(`spatial-spur-rust` 0.2.3). To test it before the compatible wheel is
+published, install from the matching shared-core checkout. The full pipeline
+also needs the matching development checkout of SCPC for native execution.
+
+```bash
+uv pip install ../spatial-rust/crates/spatial-py -e ../scpc-python
+```

@@ -101,6 +101,21 @@ def test_spurtransform_rejects_missing_variable(sample_df: pd.DataFrame) -> None
         )
 
 
+def test_spurtransform_evaluates_terms_on_one_complete_case_sample() -> None:
+    df = pd.DataFrame(
+        {"y": [1.0, 2.0, 3.0, 4.0], "x": [1.0, np.nan, 3.0, 5.0], "g": ["a"] * 4},
+        index=[10, 10, 20, 10],
+    )
+    out = spurtransform(
+        "np.log(y) ~ I(x ** 2)", df, transformation="cluster", clustvar="g"
+    )
+    y = np.log([1.0, 3.0, 4.0])
+    x2 = np.array([1.0, 9.0, 25.0])
+    assert out.index.equals(df.index)
+    npt.assert_allclose(out["h_np.log(y)"], np.insert(y - np.mean(y), 1, np.nan))
+    npt.assert_allclose(out["h_I(x ** 2)"], np.insert(x2 - np.mean(x2), 1, np.nan))
+
+
 def test_spurtransform_matches_direct_transform(
     sample_df: pd.DataFrame,
 ) -> None:

@@ -104,7 +104,7 @@ def haversine_distance(
     dlam = np.radians(lon2_arr - lon1_arr)
 
     a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
-    return 2 * R * np.arcsin(np.sqrt(a))
+    return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
 
 
 def get_distance_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
@@ -143,7 +143,23 @@ def get_distance_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     else:
         from scipy.spatial.distance import cdist
 
-        distmat = cdist(coords, coords, metric="euclidean")
+        # Squaring distances is faster at ordinary scales. When coordinates
+        # are large or adjacencies may be subnormal after squaring, use hypot.
+        coords = np.asarray(coords, dtype=float)
+        mag = np.abs(coords)
+        finfo = np.finfo(float)
+        large = np.sqrt(finfo.max / coords.shape[1]) / 2
+        small = 2 * np.sqrt(finfo.tiny) / finfo.eps
+        if np.any(mag > large) or np.any((mag > 0) & (mag < small)):
+            distmat = np.zeros((n, n), dtype=float)
+            for axis in coords.T:
+                for start in range(0, n, 256):
+                    stop = start + 256
+                    block = distmat[start:stop]
+                    differences = axis[start:stop, None] - axis[None, :]
+                    np.hypot(block, differences, out=block)
+        else:
+            distmat = cdist(coords, coords, metric="euclidean")
 
     return distmat
 

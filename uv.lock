@@ -1632,13 +1632,15 @@ wheels = [
 
 [[package]]
 name = "spur-python"
-version = "0.1.1"
+version = "0.1.2.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
     { name = "pandas" },
+    { name = "patsy" },
     { name = "scipy" },
     { name = "scpc-python" },
+    { name = "statsmodels" },
 ]
 
 [package.dev-dependencies]
@@ -1655,8 +1657,10 @@ dev = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "pandas", specifier = ">=3.0.2" },
+    { name = "patsy", specifier = ">=1.0.2" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "scpc-python", specifier = ">=0.1.1" },
+    { name = "statsmodels", specifier = ">=0.14.6" },
 ]
 
 [package.metadata.requires-dev]

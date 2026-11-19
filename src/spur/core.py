@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import importlib
+from inspect import signature
 import math
 import os
 from typing import Any, Literal, Optional
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 from scpc import scpc
 import statsmodels.formula.api as smf
+from statsmodels.tools.sm_exceptions import MissingDataError
 
 from .types import (
     Fits,
@@ -26,10 +28,9 @@ from .utils.dist import (
     resolve_spur_coords,
 )
 from .utils.formula import (
+    evaluate_formula,
     parse_residual_formula,
     parse_single_var_formula,
-    parse_transform_formula,
-    rewrite_formula_with_prefix,
 )
 from .utils.inference import (
     get_ha_param_i0,
@@ -54,8 +55,8 @@ from .utils.matrix import (
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
-RUST_API_VERSION = 5
-SPUR_RUST_API_VERSION = 2
+RUST_API_VERSION = 6
+SPUR_RUST_API_VERSION = 3
 EARTH_RADIUS_M = 6_371_000.0
 EARTH_CIRCUMFERENCE_M = 2.0 * math.pi * EARTH_RADIUS_M
 
@@ -130,7 +131,7 @@ def _require_rust_if_requested(resolved_backend: str) -> Any | None:
     rust_mod = load_rust_backend()
     if rust_mod is None and resolved_backend == "rust":
         raise RuntimeError(
-            "Rust backend requested, but `spatial_spur_rust` with SPUR support is unavailable or incompatible."
+            "Rust backend requested, but `spatial_spur_rust` with compatible SPUR support is unavailable. Install spatial-spur-rust >= 0.2.3."
         )
     return rust_mod
 
@@ -234,6 +235,253 @@ def _try_rust_spur_test(
     return _test_result_from_rust(test_type, rust_res, is_i0=is_i0), tied
 
 
+def _fallback_reason(backend: str, tied: bool = False) -> str | None:
+    if tied:
+        return "tied_eigenspace"
+    return "missing_or_incompatible_native_extension" if backend == "auto" else None
+
+
+def _validate_test_dimensions(
+    q: int, nrep: int, n: int, design_basis: np.ndarray | None = None
+) -> None:
+    if q >= n:
+        raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
+    if q < 2:
+        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
+    if nrep < 1:
+        raise ValueError(f"nrep={nrep} must be >= 1.")
+    if design_basis is not None and q > n - design_basis.shape[1]:
+        raise ValueError(
+            f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
+        )
+
+
+def _run_spur_test(
+    test_type: str,
+    coords: np.ndarray,
+    latlong: bool,
+    y: np.ndarray,
+    q: int,
+    nrep: int,
+    seed: int,
+    backend: str,
+    nthreads: int | None,
+    *,
+    x_in: np.ndarray | None = None,
+) -> TestResult:
+    design_basis = None if x_in is None else orthonormal_design_basis(x_in)
+    _validate_test_dimensions(q, nrep, len(y), design_basis)
+    emat = _draw_emat(seed, q, nrep)
+    rust_res, tied = _try_rust_spur_test(
+        test_type,
+        coords=coords,
+        latlong=latlong,
+        y=y,
+        emat=emat,
+        q=q,
+        nrep=nrep,
+        resolved_backend=backend,
+        resolved_nthreads=nthreads,
+        x_in=x_in,
+    )
+    if rust_res is not None:
+        return rust_res
+    return _fallback_spur_test(
+        test_type,
+        y,
+        normalized_distmat(coords, latlon=latlong),
+        emat,
+        design_basis,
+        tied=tied,
+        fallback_reason=_fallback_reason(backend, tied),
+    )
+
+
+def _fallback_spur_test(
+    test_type: str,
+    y: np.ndarray,
+    distmat: np.ndarray,
+    emat: np.ndarray,
+    design_basis: np.ndarray | None,
+    *,
+    tied: bool,
+    fallback_reason: str | None,
+) -> TestResult:
+    q = emat.shape[0]
+    projection = (
+        None if design_basis is None else np.eye(len(y)) - design_basis @ design_basis.T
+    )
+
+    def sigma(c: float) -> np.ndarray:
+        if projection is None:
+            return get_sigma_dm(distmat, c)
+        return get_sigma_residual(distmat, c, projection)
+
+    sigdm_bm = (
+        demean_matrix(get_sigma_lbm(distmat))
+        if projection is None
+        else sigma(get_cbar(0.999, distmat))
+    )
+    r = get_r(sigdm_bm, q)
+    P = validate_and_project_y(y, r)
+    if test_type.startswith("i0"):
+        return _fallback_spur_i0(
+            test_type, distmat, emat, r, P, sigdm_bm, sigma, tied, fallback_reason
+        )
+    return _fallback_spur_i1(
+        test_type,
+        distmat,
+        emat,
+        r,
+        P,
+        sigdm_bm,
+        sigma,
+        projection,
+        tied,
+        fallback_reason,
+    )
+
+
+def _fallback_spur_i0(
+    test_type: str,
+    distmat: np.ndarray,
+    emat: np.ndarray,
+    r: np.ndarray,
+    P: np.ndarray,
+    sigdm_bm: np.ndarray,
+    sigma: Callable[[float], np.ndarray],
+    tied: bool,
+    fallback_reason: str | None,
+) -> TestResult:
+    q = emat.shape[0]
+    rho = 0.001
+    c = get_cbar(rho, distmat)
+    sigdm_rho = sigma(c)
+
+    om_rho = r.T @ sigdm_rho @ r
+    om_bm = r.T @ sigdm_bm @ r
+    if not _different_covariance_shapes(om_rho, om_bm):
+        raise ValueError(
+            "SPUR experiment is uninformative: covariance shapes are proportional."
+        )
+
+    om_i0 = om_rho
+    om_ho = om_rho
+    ha_parm = get_ha_param_i0(om_ho, om_i0, om_bm, emat)
+    om_ha = om_i0 + ha_parm * om_bm
+
+    ch_omi_ho = cholesky_upper(np.linalg.inv(om_ho))
+    ch_omi_ha = cholesky_upper(np.linalg.inv(om_ha))
+
+    y_P_ho = ch_omi_ho @ P
+    y_P_ha = ch_omi_ha @ P
+    q_P_ho = np.sum(y_P_ho**2)
+    q_P_ha = np.sum(y_P_ha**2)
+    LR = float(q_P_ho / q_P_ha)
+
+    rho_min = 0.0001
+    rho_max = 0.03
+    n_rho = 30
+    rho_grid = np.linspace(rho_min, rho_max, n_rho)
+
+    ch_om_ho_list = []
+    for i in range(n_rho):
+        rho_i = rho_grid[i]
+        if rho_i > 0:
+            c_i = get_cbar(rho_i, distmat)
+            sigdm_ho_i = sigma(c_i)
+            om_ho_i = r.T @ sigdm_ho_i @ r
+        else:
+            om_ho_i = np.eye(q)
+        ch_om_ho_list.append(cholesky_upper(om_ho_i))
+
+    pvalue_vec = np.zeros(n_rho)
+    cvalue_mat = np.zeros((n_rho, 3))
+    sz_vec = np.array([0.01, 0.05, 0.10])
+
+    for ir in range(n_rho):
+        ch_om_ho_ir = ch_om_ho_list[ir]
+        y_ho = ch_om_ho_ir.T @ emat
+        y_ho_ho = ch_omi_ho @ y_ho
+        y_ho_ha = ch_omi_ha @ y_ho
+        q_ho_ho = np.sum(y_ho_ho**2, axis=0)
+        q_ho_ha = np.sum(y_ho_ha**2, axis=0)
+        lr_ho = q_ho_ho / q_ho_ha
+        cvalue_mat[ir, :] = np.quantile(lr_ho, 1 - sz_vec)
+        pvalue_vec[ir] = np.mean(lr_ho > LR)
+
+    cvalue = cvalue_mat.max(axis=0)
+    pvalue = float(pvalue_vec.max())
+
+    return TestResult(
+        test_type=test_type,
+        LR=LR,
+        pvalue=pvalue,
+        cv=cvalue,
+        ha_param=ha_parm,
+        pvalue_mat=pvalue_vec,
+        cvalue_mat=cvalue_mat,
+        rho_grid=rho_grid,
+        backend="fallback",
+        tied=tied,
+        fallback_reason=fallback_reason,
+    )
+
+
+def _fallback_spur_i1(
+    test_type: str,
+    distmat: np.ndarray,
+    emat: np.ndarray,
+    r: np.ndarray,
+    P: np.ndarray,
+    sigdm_bm: np.ndarray,
+    sigma: Callable[[float], np.ndarray],
+    projection: np.ndarray | None,
+    tied: bool,
+    fallback_reason: str | None,
+) -> TestResult:
+    om_ho = r.T @ sigdm_bm @ r
+
+    _validate_i1_shapes(distmat, r, projection)
+    ha_parm = (
+        get_ha_param_i1(om_ho, distmat, r, emat)
+        if projection is None
+        else get_ha_param_i1_residual(om_ho, distmat, r, emat, projection)
+    )
+    sigdm_ha = sigma(ha_parm)
+    om_ha = r.T @ sigdm_ha @ r
+
+    ch_om_ho = cholesky_upper(om_ho)
+    omi_ho = np.linalg.inv(om_ho)
+    omi_ha = np.linalg.inv(om_ha)
+    ch_omi_ho = cholesky_upper(omi_ho)
+    ch_omi_ha = cholesky_upper(omi_ha)
+
+    y_ho = ch_om_ho.T @ emat
+    y_ho_ho = ch_omi_ho @ y_ho
+    y_ho_ha = ch_omi_ha @ y_ho
+    q_ho_ho = np.sum(y_ho_ho**2, axis=0)
+    q_ho_ha = np.sum(y_ho_ha**2, axis=0)
+    lr_ho = q_ho_ho / q_ho_ha
+
+    sz_vec = np.array([0.01, 0.05, 0.10])
+    cv_vec = np.quantile(lr_ho, 1 - sz_vec)
+
+    LR = float((P.T @ omi_ho @ P) / (P.T @ omi_ha @ P))
+    pvalue = float(np.mean(lr_ho > LR))
+
+    return TestResult(
+        test_type=test_type,
+        LR=LR,
+        pvalue=pvalue,
+        cv=cv_vec,
+        ha_param=ha_parm,
+        backend="fallback",
+        tied=tied,
+        fallback_reason=fallback_reason,
+    )
+
+
 def spurtest_i1(
     var: str,
     data: pd.DataFrame,
@@ -302,74 +550,16 @@ def spurtest_i1(
         coords_euclidean=coords_euclidean,
     )
 
-    resolved_backend = resolve_backend(backend)
-    resolved_nthreads = validate_nthreads(nthreads)
-    coords = coord_info["coords"]
-    latlong = coord_info["latlong"]
-    n = coords.shape[0]
-    if q >= n:
-        raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 2:
-        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
-    if nrep < 1:
-        raise ValueError(f"nrep={nrep} must be >= 1.")
-
-    emat = _draw_emat(seed, q, nrep)
-    q = emat.shape[0]
-
-    rust_res, tied_from_rust = _try_rust_spur_test(
+    return _run_spur_test(
         "i1",
-        coords=coords,
-        latlong=latlong,
-        y=Y,
-        emat=emat,
-        q=q,
-        nrep=nrep,
-        resolved_backend=resolved_backend,
-        resolved_nthreads=resolved_nthreads,
-    )
-    if rust_res is not None:
-        return rust_res
-
-    distmat = normalized_distmat(coords, latlon=latlong)
-
-    sigdm_bm = demean_matrix(get_sigma_lbm(distmat))
-    R = get_r(sigdm_bm, q)
-    P = validate_and_project_y(Y, R)
-    om_ho = R.T @ sigdm_bm @ R
-
-    _validate_i1_shapes(distmat, R)
-    ha_parm = get_ha_param_i1(om_ho, distmat, R, emat)
-    sigdm_ha = get_sigma_dm(distmat, ha_parm)
-    om_ha = R.T @ sigdm_ha @ R
-
-    ch_om_ho = cholesky_upper(om_ho)
-    omi_ho = np.linalg.inv(om_ho)
-    omi_ha = np.linalg.inv(om_ha)
-    ch_omi_ho = cholesky_upper(omi_ho)
-    ch_omi_ha = cholesky_upper(omi_ha)
-
-    y_ho = ch_om_ho.T @ emat
-    y_ho_ho = ch_omi_ho @ y_ho
-    y_ho_ha = ch_omi_ha @ y_ho
-    q_ho_ho = np.sum(y_ho_ho**2, axis=0)
-    q_ho_ha = np.sum(y_ho_ha**2, axis=0)
-    lr_ho = q_ho_ho / q_ho_ha
-
-    sz_vec = np.array([0.01, 0.05, 0.10])
-    cv_vec = np.quantile(lr_ho, 1 - sz_vec)
-
-    LR = float((P.T @ omi_ho @ P) / (P.T @ omi_ha @ P))
-    pvalue = float(np.mean(lr_ho > LR))
-
-    return TestResult(
-        test_type="i1",
-        LR=LR,
-        pvalue=pvalue,
-        cv=cv_vec,
-        ha_param=ha_parm,
-        backend="fallback",
-        tied=tied_from_rust,
+        coord_info["coords"],
+        coord_info["latlong"],
+        Y,
+        q,
+        nrep,
+        seed,
+        resolve_backend(backend),
+        validate_nthreads(nthreads),
     )
 
 
@@ -441,111 +631,16 @@ def spurtest_i0(
         coords_euclidean=coords_euclidean,
     )
 
-    resolved_backend = resolve_backend(backend)
-    resolved_nthreads = validate_nthreads(nthreads)
-    coords = coord_info["coords"]
-    latlong = coord_info["latlong"]
-    n = coords.shape[0]
-    if q >= n:
-        raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 2:
-        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
-    if nrep < 1:
-        raise ValueError(f"nrep={nrep} must be >= 1.")
-
-    emat = _draw_emat(seed, q, nrep)
-    q = emat.shape[0]
-
-    rust_res, tied_from_rust = _try_rust_spur_test(
+    return _run_spur_test(
         "i0",
-        coords=coords,
-        latlong=latlong,
-        y=Y,
-        emat=emat,
-        q=q,
-        nrep=nrep,
-        resolved_backend=resolved_backend,
-        resolved_nthreads=resolved_nthreads,
-    )
-    if rust_res is not None:
-        return rust_res
-
-    distmat = normalized_distmat(coords, latlon=latlong)
-
-    sigdm_bm = demean_matrix(get_sigma_lbm(distmat))
-    R = get_r(sigdm_bm, q)
-    P = validate_and_project_y(Y, R)
-
-    rho = 0.001
-    c = get_cbar(rho, distmat)
-    sigdm_rho = get_sigma_dm(distmat, c)
-
-    om_rho = R.T @ sigdm_rho @ R
-    om_bm = R.T @ sigdm_bm @ R
-    if not _different_covariance_shapes(om_rho, om_bm):
-        raise ValueError(
-            "SPUR experiment is uninformative: covariance shapes are proportional."
-        )
-
-    om_i0 = om_rho
-    om_ho = om_rho
-    ha_parm = get_ha_param_i0(om_ho, om_i0, om_bm, emat)
-    om_ha = om_i0 + ha_parm * om_bm
-
-    ch_omi_ho = cholesky_upper(np.linalg.inv(om_ho))
-    ch_omi_ha = cholesky_upper(np.linalg.inv(om_ha))
-
-    y_P_ho = ch_omi_ho @ P
-    y_P_ha = ch_omi_ha @ P
-    q_P_ho = np.sum(y_P_ho**2)
-    q_P_ha = np.sum(y_P_ha**2)
-    LR = float(q_P_ho / q_P_ha)
-
-    rho_min = 0.0001
-    rho_max = 0.03
-    n_rho = 30
-    rho_grid = np.linspace(rho_min, rho_max, n_rho)
-
-    ch_om_ho_list = []
-    for i in range(n_rho):
-        rho_i = rho_grid[i]
-        if rho_i > 0:
-            c_i = get_cbar(rho_i, distmat)
-            sigdm_ho_i = get_sigma_dm(distmat, c_i)
-            om_ho_i = R.T @ sigdm_ho_i @ R
-        else:
-            om_ho_i = np.eye(q)
-        ch_om_ho_list.append(cholesky_upper(om_ho_i))
-
-    pvalue_vec = np.zeros(n_rho)
-    cvalue_mat = np.zeros((n_rho, 3))
-    sz_vec = np.array([0.01, 0.05, 0.10])
-
-    for ir in range(n_rho):
-        ch_om_ho_ir = ch_om_ho_list[ir]
-        y_ho = ch_om_ho_ir.T @ emat
-        y_ho_ho = ch_omi_ho @ y_ho
-        y_ho_ha = ch_omi_ha @ y_ho
-        q_ho_ho = np.sum(y_ho_ho**2, axis=0)
-        q_ho_ha = np.sum(y_ho_ha**2, axis=0)
-        lr_ho = q_ho_ho / q_ho_ha
-        cvalue_mat[ir, :] = np.quantile(lr_ho, 1 - sz_vec)
-        pvalue_vec[ir] = np.mean(lr_ho > LR)
-
-    cvalue = cvalue_mat.max(axis=0)
-    pvalue = float(pvalue_vec.max())
-
-    return TestResult(
-        test_type="i0",
-        LR=LR,
-        pvalue=pvalue,
-        cv=cvalue,
-        ha_param=ha_parm,
-        pvalue_mat=pvalue_vec,
-        cvalue_mat=cvalue_mat,
-        rho_grid=rho_grid,
-        backend="fallback",
-        tied=tied_from_rust,
+        coord_info["coords"],
+        coord_info["latlong"],
+        Y,
+        q,
+        nrep,
+        seed,
+        resolve_backend(backend),
+        validate_nthreads(nthreads),
     )
 
 
@@ -617,86 +712,18 @@ def spurtest_i1resid(
         coords_euclidean=coords_euclidean,
     )
 
-    resolved_backend = resolve_backend(backend)
-    resolved_nthreads = validate_nthreads(nthreads)
-    coords = coord_info["coords"]
-    latlong = coord_info["latlong"]
-    n = coords.shape[0]
-    if q >= n:
-        raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 2:
-        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
-    if nrep < 1:
-        raise ValueError(f"nrep={nrep} must be >= 1.")
-
     Y = parsed["Y"].reshape(-1)
-    X_in = parsed["X_in"]
-    design_basis = orthonormal_design_basis(X_in)
-    if q > n - design_basis.shape[1]:
-        raise ValueError(
-            f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
-        )
-    emat = _draw_emat(seed, q, nrep)
-    q = emat.shape[0]
-
-    rust_res, tied_from_rust = _try_rust_spur_test(
+    return _run_spur_test(
         "i1resid",
-        coords=coords,
-        latlong=latlong,
-        y=Y,
-        emat=emat,
-        q=q,
-        nrep=nrep,
-        resolved_backend=resolved_backend,
-        resolved_nthreads=resolved_nthreads,
-        x_in=X_in,
-    )
-    if rust_res is not None:
-        return rust_res
-
-    distmat = normalized_distmat(coords, latlon=latlong)
-    M = np.eye(n) - design_basis @ design_basis.T
-
-    rho_bm = 0.999
-    c_bm = get_cbar(rho_bm, distmat)
-    sigdm_bm = get_sigma_residual(distmat, c_bm, M)
-
-    R = get_r(sigdm_bm, q)
-    P = validate_and_project_y(Y, R)
-    om_ho = R.T @ sigdm_bm @ R
-
-    _validate_i1_shapes(distmat, R, M)
-    ha_parm = get_ha_param_i1_residual(om_ho, distmat, R, emat, M)
-    sigdm_ha = get_sigma_residual(distmat, ha_parm, M)
-    om_ha = R.T @ sigdm_ha @ R
-
-    ch_om_ho = cholesky_upper(om_ho)
-    omi_ho = np.linalg.inv(om_ho)
-    omi_ha = np.linalg.inv(om_ha)
-    ch_omi_ho = cholesky_upper(omi_ho)
-    ch_omi_ha = cholesky_upper(omi_ha)
-
-    y_ho = ch_om_ho.T @ emat
-    y_ho_ho = ch_omi_ho @ y_ho
-    y_ho_ha = ch_omi_ha @ y_ho
-    q_ho_ho = np.sum(y_ho_ho**2, axis=0)
-    q_ho_ha = np.sum(y_ho_ha**2, axis=0)
-    lr_ho = q_ho_ho / q_ho_ha
-
-    sz_vec = np.array([0.01, 0.05, 0.10])
-    cv_vec = np.quantile(lr_ho, 1 - sz_vec)
-
-    LR = float((P.T @ omi_ho @ P) / (P.T @ omi_ha @ P))
-    pvalue = float(np.mean(lr_ho > LR))
-
-    return TestResult(
-        test_type="i1resid",
-        LR=LR,
-        pvalue=pvalue,
-        cv=cv_vec,
-        ha_param=ha_parm,
-        backend="fallback",
-        tied=tied_from_rust,
+        coord_info["coords"],
+        coord_info["latlong"],
+        Y,
+        q,
+        nrep,
+        seed,
+        resolve_backend(backend),
+        validate_nthreads(nthreads),
+        x_in=parsed["X_in"],
     )
 
 
@@ -768,123 +795,18 @@ def spurtest_i0resid(
         coords_euclidean=coords_euclidean,
     )
 
-    resolved_backend = resolve_backend(backend)
-    resolved_nthreads = validate_nthreads(nthreads)
-    coords = coord_info["coords"]
-    latlong = coord_info["latlong"]
-    n = coords.shape[0]
-    if q >= n:
-        raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-    if q < 2:
-        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
-    if nrep < 1:
-        raise ValueError(f"nrep={nrep} must be >= 1.")
-
     Y = parsed["Y"].reshape(-1)
-    X_in = parsed["X_in"]
-    design_basis = orthonormal_design_basis(X_in)
-    if q > n - design_basis.shape[1]:
-        raise ValueError(
-            f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
-        )
-    emat = _draw_emat(seed, q, nrep)
-    q = emat.shape[0]
-
-    rust_res, tied_from_rust = _try_rust_spur_test(
+    return _run_spur_test(
         "i0resid",
-        coords=coords,
-        latlong=latlong,
-        y=Y,
-        emat=emat,
-        q=q,
-        nrep=nrep,
-        resolved_backend=resolved_backend,
-        resolved_nthreads=resolved_nthreads,
-        x_in=X_in,
-    )
-    if rust_res is not None:
-        return rust_res
-
-    distmat = normalized_distmat(coords, latlon=latlong)
-    M = np.eye(n) - design_basis @ design_basis.T
-
-    rho_bm = 0.999
-    c_bm = get_cbar(rho_bm, distmat)
-    sigdm_bm = get_sigma_residual(distmat, c_bm, M)
-
-    R = get_r(sigdm_bm, q)
-    P = validate_and_project_y(Y, R)
-
-    rho = 0.001
-    c = get_cbar(rho, distmat)
-    sigdm_rho = get_sigma_residual(distmat, c, M)
-
-    om_rho = R.T @ sigdm_rho @ R
-    om_bm = R.T @ sigdm_bm @ R
-    if not _different_covariance_shapes(om_rho, om_bm):
-        raise ValueError(
-            "SPUR experiment is uninformative: covariance shapes are proportional."
-        )
-
-    om_i0 = om_rho
-    om_ho = om_rho
-    ha_parm = get_ha_param_i0(om_ho, om_i0, om_bm, emat)
-    om_ha = om_i0 + ha_parm * om_bm
-
-    ch_omi_ho = cholesky_upper(np.linalg.inv(om_ho))
-    ch_omi_ha = cholesky_upper(np.linalg.inv(om_ha))
-
-    y_P_ho = ch_omi_ho @ P
-    y_P_ha = ch_omi_ha @ P
-    q_P_ho = np.sum(y_P_ho**2)
-    q_P_ha = np.sum(y_P_ha**2)
-    LR = float(q_P_ho / q_P_ha)
-
-    rho_min = 0.0001
-    rho_max = 0.03
-    n_rho = 30
-    rho_grid = np.linspace(rho_min, rho_max, n_rho)
-
-    ch_om_ho_list = []
-    for i in range(n_rho):
-        rho_i = rho_grid[i]
-        if rho_i > 0:
-            c_i = get_cbar(rho_i, distmat)
-            sigdm_ho_i = get_sigma_residual(distmat, c_i, M)
-            om_ho_i = R.T @ sigdm_ho_i @ R
-        else:
-            om_ho_i = np.eye(q)
-        ch_om_ho_list.append(cholesky_upper(om_ho_i))
-
-    pvalue_vec = np.zeros(n_rho)
-    cvalue_mat = np.zeros((n_rho, 3))
-    sz_vec = np.array([0.01, 0.05, 0.10])
-
-    for ir in range(n_rho):
-        ch_om_ho_ir = ch_om_ho_list[ir]
-        y_ho = ch_om_ho_ir.T @ emat
-        y_ho_ho = ch_omi_ho @ y_ho
-        y_ho_ha = ch_omi_ha @ y_ho
-        q_ho_ho = np.sum(y_ho_ho**2, axis=0)
-        q_ho_ha = np.sum(y_ho_ha**2, axis=0)
-        lr_ho = q_ho_ho / q_ho_ha
-        cvalue_mat[ir, :] = np.quantile(lr_ho, 1 - sz_vec)
-        pvalue_vec[ir] = np.mean(lr_ho > LR)
-
-    cvalue = cvalue_mat.max(axis=0)
-    pvalue = float(pvalue_vec.max())
-
-    return TestResult(
-        test_type="i0resid",
-        LR=LR,
-        pvalue=pvalue,
-        cv=cvalue,
-        ha_param=ha_parm,
-        pvalue_mat=pvalue_vec,
-        cvalue_mat=cvalue_mat,
-        rho_grid=rho_grid,
-        backend="fallback",
-        tied=tied_from_rust,
+        coord_info["coords"],
+        coord_info["latlong"],
+        Y,
+        q,
+        nrep,
+        seed,
+        resolve_backend(backend),
+        validate_nthreads(nthreads),
+        x_in=parsed["X_in"],
     )
 
 
@@ -1053,14 +975,18 @@ def spurtransform(
         ... )
         >>> df_out[["h_am", "h_fracblack"]].head()
     """
-    df = data.copy()
-    varlist = parse_transform_formula(formula, df)
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("`data` must be a pandas DataFrame.")
+    y, x = evaluate_formula(formula, data, allow_no_response=True)
+    variables = pd.concat([y, x.drop(columns="Intercept", errors="ignore")], axis=1)
+    variables = variables.loc[:, ~variables.columns.duplicated()]
+    if variables.shape[1] == 0:
+        raise ValueError("No variables found in `formula`.")
+    use_rows = np.isin(np.arange(len(data)), variables.index)
+    sample = data.iloc[np.flatnonzero(use_rows)]
+    values = variables.to_numpy(dtype=np.float64)
     resolved_backend = resolve_backend(backend)
     resolved_nthreads = validate_nthreads(nthreads)
-
-    for var in varlist:
-        if var not in df.columns:
-            raise ValueError(f"Variable '{var}' not found in DataFrame")
 
     if transformation not in ("cluster", "nn", "iso", "lbmgls"):
         raise ValueError(
@@ -1068,28 +994,30 @@ def spurtransform(
             "Use 'nn', 'iso', 'lbmgls', or 'cluster'."
         )
 
-    n = len(df)
+    n = len(sample)
     rust_mod = _require_rust_if_requested(resolved_backend)
 
     cluster_codes: np.ndarray | None = None
+    cluster: np.ndarray | None = None
     coords_raw: np.ndarray | None = None
     latlon = False
     if transformation == "cluster":
         assert clustvar is not None, (
             "clustvar must be specified for transformation='cluster'"
         )
-        assert clustvar in df.columns, (
+        assert clustvar in sample.columns, (
             f"Cluster variable '{clustvar}' not found in DataFrame"
         )
-        assert not df[clustvar].isna().any(), (
+        assert not sample[clustvar].isna().any(), (
             f"Cluster column '{clustvar}' contains missing values."
         )
-        codes, _ = pd.factorize(df[clustvar], sort=False)
+        cluster = sample[clustvar].to_numpy()
+        codes, _ = pd.factorize(cluster, sort=False)
         cluster_codes = np.ascontiguousarray(codes, dtype=np.int64)
     else:
         coord_info = resolve_spur_coords(
-            data=df,
-            use_rows=np.ones(n, dtype=bool),
+            data=data,
+            use_rows=use_rows,
             lon=lon,
             lat=lat,
             coords_euclidean=coords_euclidean,
@@ -1106,10 +1034,6 @@ def spurtransform(
             )
 
     if rust_mod is not None and (n >= 2 or resolved_backend == "rust"):
-        cols_arr = [np.asarray(df[var].values, dtype=np.float64) for var in varlist]
-        all_finite = len(cols_arr) > 0 and all(
-            np.isfinite(col).all() for col in cols_arr
-        )
         radius_arg = None
         if transformation == "iso" and radius is not None:
             radius_arg = (
@@ -1117,45 +1041,24 @@ def spurtransform(
             )
         coords_rust = None if coords_raw is None else _rust_coords(coords_raw, latlon)
 
-        if all_finite:
-            y_mat = np.ascontiguousarray(np.column_stack(cols_arr), dtype=np.float64)
-            rust_res = rust_mod.run_spur_transform(
-                transformation,
-                n,
-                y=y_mat,
-                coords=coords_rust,
-                latlong=bool(latlon),
-                radius=radius_arg,
-                strict_lt=True,
-                exclude_zero_distances=False,
-                cluster_id=cluster_codes,
-                return_matrix=False,
-                demean_lbmgls=False,
-                nthreads=resolved_nthreads,
-            )
-            tr_mat = np.asarray(rust_res["transformed"], dtype=float)
-            for idx, var in enumerate(varlist):
-                df[f"{prefix}{var}"] = tr_mat[:, idx]
-            return df
-
         rust_res = rust_mod.run_spur_transform(
             transformation,
             n,
-            y=None,
+            y=np.ascontiguousarray(values),
             coords=coords_rust,
             latlong=bool(latlon),
             radius=radius_arg,
             strict_lt=True,
-            exclude_zero_distances=False,
+            exclude_zero_distances=transformation == "iso",
             cluster_id=cluster_codes,
-            return_matrix=True,
+            return_matrix=False,
             demean_lbmgls=False,
             nthreads=resolved_nthreads,
         )
-        M = np.asarray(rust_res["matrix"], dtype=float)
+        transformed = np.asarray(rust_res["transformed"], dtype=float)
     elif transformation == "cluster":
-        cluster = df[clustvar].to_numpy()
-        M = cluster_matrix(cluster)
+        assert cluster is not None
+        transformed = cluster_matrix(cluster) @ values
     else:
         assert coords_raw is not None
         if transformation == "nn":
@@ -1166,18 +1069,13 @@ def spurtransform(
         else:
             M = lbmgls_matrix(coords_raw, latlon=latlon)
 
-    for var in varlist:
-        data_arr = df[var].values
+        transformed = M @ values
 
-        if np.any(np.isnan(data_arr)):
-            print(
-                f"Warning: Variable '{var}' contains {np.isnan(data_arr).sum()} missing values. "
-                f"Transformed values involving missing data will be NaN."
-            )
-
-        transformed = M @ data_arr
-        new_name = f"{prefix}{var}"
-        df[new_name] = transformed
+    df = data.copy()
+    for var, column in zip(variables.columns, transformed.T, strict=True):
+        out = np.full(len(data), np.nan)
+        out[use_rows] = column
+        df[f"{prefix}{var}"] = out
 
     return df
 
@@ -1300,6 +1198,7 @@ def spurhalflife(
                 hl_grid=np.asarray(rust_res["hl_grid_ho"], dtype=float).ravel(),
                 backend="rust",
                 tied=tied_from_rust,
+                distance_units="meters" if latlon else "coordinate units",
             )
 
     distmat_raw = get_distance_matrix(coords, latlon=latlon)
@@ -1329,6 +1228,8 @@ def spurhalflife(
         normdist=normdist,
         backend="fallback",
         tied=tied_from_rust,
+        distance_units="meters" if latlon else "coordinate units",
+        fallback_reason=_fallback_reason(resolved_backend, tied_from_rust),
     )
 
 
@@ -1384,278 +1285,190 @@ def spur(
     if not isinstance(formula, str) or "~" not in formula:
         raise ValueError("`formula` must be two-sided, e.g. `y ~ x1 + x2`.")
 
-    depvar = formula.split("~", 1)[0].strip()
-    if not depvar:
-        raise ValueError(
-            "`formula` must have a dependent variable on the left-hand side."
+    if not all(part.strip() for part in formula.split("~", 1)):
+        raise ValueError("`formula` must have both a response and a right-hand side.")
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("`data` must be a pandas DataFrame.")
+
+    backend = resolve_backend(backend)
+    nthreads = validate_nthreads(nthreads)
+    rust_mod = _require_rust_if_requested(backend)
+    scpc_options: dict[str, Any] = {}
+    scpc_parameters = signature(scpc).parameters
+    if "backend" in scpc_parameters:
+        scpc_options["backend"] = backend
+    elif backend == "rust":
+        raise RuntimeError(
+            "Rust execution in spur() requires a compatible SCPC package."
         )
-
-    resolved_backend = resolve_backend(backend)
-    resolved_nthreads = validate_nthreads(nthreads)
-
-    scpc_extra: dict[str, Any] = {}
-    if backend is not None:
-        scpc_extra["backend"] = backend
     if nthreads is not None:
-        scpc_extra["nthreads"] = nthreads
-
-    rust_mod = _require_rust_if_requested(resolved_backend)
-    no_monkeypatch = (
-        spurtest_i0 is _ORIG_SPURTEST_I0
-        and spurtest_i1 is _ORIG_SPURTEST_I1
-        and spurtest_i0resid is _ORIG_SPURTEST_I0RESID
-        and spurtest_i1resid is _ORIG_SPURTEST_I1RESID
-        and spurtransform is _ORIG_SPURTRANSFORM
-    )
-
-    if rust_mod is not None and no_monkeypatch:
-        parsed_resid = parse_residual_formula(formula, data, "spur()")
-        use_rows = parsed_resid["use_rows"]
-        varlist = parse_transform_formula(formula, data)
-        y_col = (
-            data[depvar].to_numpy(dtype=float)
-            if depvar in data.columns
-            else np.array([])
-        )
-        tr_cols = (
-            [data[v].to_numpy(dtype=float) for v in varlist if v in data.columns]
-            if len(varlist) > 0
-            else []
-        )
-        can_use_pipeline = (
-            bool(np.all(use_rows))
-            and len(y_col) == len(data)
-            and bool(np.isfinite(y_col).all())
-            and len(tr_cols) == len(varlist)
-            and len(varlist) > 0
-            and all(bool(np.isfinite(c).all()) for c in tr_cols)
-        )
-        if can_use_pipeline:
-            coord_info = resolve_spur_coords(
-                data=data,
-                use_rows=use_rows,
-                lon=lon,
-                lat=lat,
-                coords_euclidean=coords_euclidean,
+        if "nthreads" in scpc_parameters:
+            scpc_options["nthreads"] = nthreads
+        elif "backend" in scpc_parameters and backend != "fallback":
+            raise RuntimeError(
+                "Selecting a thread count for spur() requires a compatible SCPC package."
             )
-            coords = coord_info["coords"]
-            latlong = coord_info["latlong"]
-            n = coords.shape[0]
-            if q >= n:
-                raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-            if q < 2:
-                raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
-            if nrep < 1:
-                raise ValueError(f"nrep={nrep} must be >= 1.")
-            X_in = parsed_resid["X_in"]
-            design_basis = orthonormal_design_basis(X_in)
-            if q > n - design_basis.shape[1]:
-                raise ValueError(
-                    f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
-                )
-            if coords.shape[1] == 2:
-                emat = _draw_emat(seed, q, nrep)
-                tr_mat = np.ascontiguousarray(
-                    np.column_stack(tr_cols), dtype=np.float64
-                )
-                pipe_out = rust_mod.run_spur_pipeline(
-                    _rust_coords(coords, latlong),
-                    np.ascontiguousarray(y_col, dtype=np.float64),
-                    np.ascontiguousarray(X_in, dtype=np.float64),
-                    np.ascontiguousarray(emat, dtype=np.float64),
-                    int(q),
-                    int(nrep),
-                    tr_mat,
-                    latlong=bool(latlong),
-                    demean_lbmgls=False,
-                    nthreads=resolved_nthreads,
-                )
-                any_tied = bool(pipe_out["i0"]["tied"] or pipe_out["i0resid"]["tied"])
-                if not (any_tied and resolved_backend == "auto"):
-                    i0 = _test_result_from_rust("i0", pipe_out["i0"], is_i0=True)
-                    i1 = _test_result_from_rust("i1", pipe_out["i1"], is_i0=False)
-                    i0resid = _test_result_from_rust(
-                        "i0resid", pipe_out["i0resid"], is_i0=True
-                    )
-                    i1resid = _test_result_from_rust(
-                        "i1resid", pipe_out["i1resid"], is_i0=False
-                    )
-                    transformed_data = data.copy()
-                    tr_out = np.asarray(pipe_out["transformed_vars"], dtype=float)
-                    for idx, var in enumerate(varlist):
-                        transformed_data[f"h_{var}"] = tr_out[:, idx]
 
-                    levels_model = smf.ols(formula, data=data).fit()
-                    levels_scpc = scpc(
-                        levels_model,
-                        data,
-                        lon=lon,
-                        lat=lat,
-                        coords_euclidean=coords_euclidean,
-                        avc=avc,
-                        uncond=uncond,
-                        cvs=cvs,
-                        **scpc_extra,
-                    )
-                    transformed_formula = rewrite_formula_with_prefix(formula, "h_")
-                    transformed_model = smf.ols(
-                        transformed_formula, data=transformed_data
-                    ).fit()
-                    transformed_scpc = scpc(
-                        transformed_model,
-                        transformed_data,
-                        lon=lon,
-                        lat=lat,
-                        coords_euclidean=coords_euclidean,
-                        avc=avc,
-                        uncond=uncond,
-                        cvs=cvs,
-                        **scpc_extra,
-                    )
-                    return PipelineResult(
-                        tests=Tests(
-                            i0=i0,
-                            i1=i1,
-                            i0resid=i0resid,
-                            i1resid=i1resid,
-                        ),
-                        fits=Fits(
-                            levels=RegressionResult(
-                                model=levels_model,
-                                scpc=levels_scpc,
-                            ),
-                            transformed=RegressionResult(
-                                model=transformed_model,
-                                scpc=transformed_scpc,
-                            ),
-                        ),
-                        backend="rust",
-                        tied=any_tied,
-                    )
+    if not data.index.is_unique:
+        data = data.reset_index(drop=True)
+    try:
+        fitted = smf.ols(formula, data=data)
+    except MissingDataError as error:
+        raise ValueError(
+            "The evaluated regression design and response must be finite."
+        ) from error
+    sample = data.loc[fitted.data.row_labels].copy()
+    y = np.asarray(fitted.endog, dtype=float)
+    x = np.asarray(fitted.exog, dtype=float)
+    if not np.isfinite(y).all() or not np.isfinite(x).all():
+        raise ValueError("The evaluated regression design and response must be finite.")
+    design_names = fitted.exog_names
+    intercept = "Intercept" in fitted.data.design_info.term_name_slices
+    design_basis = orthonormal_design_basis(x)
+    if not intercept:
+        constant = np.ones(len(sample))
+        if np.linalg.norm(constant - design_basis @ (design_basis.T @ constant)) <= (
+            1e-10 * math.sqrt(len(sample))
+        ):
+            raise ValueError(
+                "The intercept-free design spans a constant, so the transformed "
+                "regression would be rank-deficient. Use an explicit intercept."
+            )
+    _validate_test_dimensions(q, nrep, len(sample), design_basis)
+    levels_model = fitted.fit()
 
-    test_extra: dict[str, Any] = {}
-    if backend is not None:
-        test_extra["backend"] = backend
-    if nthreads is not None:
-        test_extra["nthreads"] = nthreads
-
-    i0 = spurtest_i0(
-        depvar,
-        data,
+    coord_info = resolve_spur_coords(
+        data=sample,
+        use_rows=np.ones(len(sample), dtype=bool),
         lon=lon,
         lat=lat,
         coords_euclidean=coords_euclidean,
-        q=q,
-        nrep=nrep,
-        seed=seed,
-        **test_extra,
     )
-    i1 = spurtest_i1(
-        depvar,
-        data,
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-        q=q,
-        nrep=nrep,
-        seed=seed,
-        **test_extra,
-    )
+    coords, latlong = coord_info["coords"], coord_info["latlong"]
+    emat = _draw_emat(seed, q, nrep)
 
-    i0resid = spurtest_i0resid(
-        formula,
-        data,
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-        q=q,
-        nrep=nrep,
-        seed=seed,
-        **test_extra,
-    )
-    i1resid = spurtest_i1resid(
-        formula,
-        data,
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-        q=q,
-        nrep=nrep,
-        seed=seed,
-        **test_extra,
-    )
+    transform_idx = [
+        i
+        for i, name in enumerate(design_names)
+        if not (intercept and name == "Intercept")
+    ]
+    transform_input = np.column_stack((y, x[:, transform_idx]))
+    test_types = ("i0", "i1", "i0resid", "i1resid")
 
-    levels_model = smf.ols(formula, data=data).fit()
-    levels_scpc = scpc(
-        levels_model,
-        data,
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-        avc=avc,
-        uncond=uncond,
-        cvs=cvs,
-        **scpc_extra,
-    )
-
-    transformed_data = spurtransform(
-        formula,
-        data,
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-        prefix="h_",
-        transformation="lbmgls",
-        **test_extra,
-    )
-    transformed_formula = rewrite_formula_with_prefix(formula, "h_")
-    transformed_model = smf.ols(transformed_formula, data=transformed_data).fit()
-    transformed_scpc = scpc(
-        transformed_model,
-        transformed_data,
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-        avc=avc,
-        uncond=uncond,
-        cvs=cvs,
-        **scpc_extra,
-    )
-
-    pipe_backend = (
-        "rust"
-        if all(
-            getattr(t, "backend", "fallback") == "rust"
-            for t in (i0, i1, i0resid, i1resid)
+    native = None
+    if rust_mod is not None:
+        native = rust_mod.run_spur_pipeline(
+            _rust_coords(coords, latlong),
+            np.ascontiguousarray(y, dtype=np.float64),
+            np.ascontiguousarray(x, dtype=np.float64),
+            emat,
+            int(q),
+            int(nrep),
+            np.ascontiguousarray(transform_input, dtype=np.float64),
+            latlong=bool(latlong),
+            demean_lbmgls=False,
+            nthreads=nthreads,
         )
-        else "fallback"
+
+    distmat = None
+    stage_backends: dict[str, str] = {}
+    fallback_reasons: dict[str, str] = {}
+    tests: dict[str, TestResult] = {}
+    for test_type in test_types:
+        stage = None if native is None else native[test_type]
+        tied = stage is not None and bool(stage["tied"])
+        if stage is not None and (backend == "rust" or not tied):
+            result = _test_result_from_rust(
+                test_type, stage, is_i0=test_type.startswith("i0")
+            )
+        else:
+            if distmat is None:
+                distmat = normalized_distmat(coords, latlon=latlong)
+            result = _fallback_spur_test(
+                test_type,
+                y,
+                distmat,
+                emat,
+                design_basis if test_type.endswith("resid") else None,
+                tied=tied,
+                fallback_reason=_fallback_reason(backend, tied),
+            )
+        tests[test_type] = result
+        stage_backends[test_type] = result.backend
+        if result.fallback_reason is not None:
+            fallback_reasons[test_type] = result.fallback_reason
+
+    if native is not None:
+        transformed = np.asarray(native["transformed_vars"], dtype=float)
+        stage_backends["transform"] = "rust"
+    else:
+        transformed = lbmgls_matrix(coords, latlon=latlong) @ transform_input
+        stage_backends["transform"] = "fallback"
+        reason = _fallback_reason(backend)
+        if reason is not None:
+            fallback_reasons["transform"] = reason
+
+    transformed_data = sample.copy()
+    names = [fitted.endog_names, *(design_names[i] for i in transform_idx)]
+    transformed_columns = []
+    transformed_terms = []
+    for name, col in zip(names, transformed.T, strict=True):
+        column = f"h_{name}"
+        while column in transformed_data.columns:
+            column = f"h_{column}"
+        transformed_data[column] = col
+        transformed_columns.append(column)
+        transformed_terms.append(column if column.isidentifier() else f"Q({column!r})")
+    rhs = transformed_terms[1:] or ["1"]
+    if not intercept:
+        rhs = ["0", *transformed_terms[1:]]
+    transformed_formula = f"{transformed_terms[0]} ~ {' + '.join(rhs)}"
+    # Formula evaluation needs only the new variables. In particular a column
+    # named Q in the input must not shadow Patsy's quoting helper.
+    transformed_spec = smf.ols(
+        transformed_formula, data=transformed_data[transformed_columns]
     )
-    pipe_tied = any(bool(getattr(t, "tied", False)) for t in (i0, i1, i0resid, i1resid))
+    orthonormal_design_basis(np.asarray(transformed_spec.exog, dtype=float))
+    transformed_model = transformed_spec.fit()
+
+    fits: dict[str, RegressionResult] = {}
+    for stage, model, frame in (
+        ("levels_scpc", levels_model, sample),
+        ("transformed_scpc", transformed_model, transformed_data),
+    ):
+        result = scpc(
+            model,
+            frame,
+            lon=lon,
+            lat=lat,
+            coords_euclidean=coords_euclidean,
+            avc=avc,
+            uncond=uncond,
+            cvs=cvs,
+            **scpc_options,
+        )
+        fits[stage] = RegressionResult(
+            model=model,
+            scpc=result,
+            coefficient_labels=tuple(design_names)
+            if stage == "transformed_scpc"
+            else None,
+        )
+        stage_backends[stage] = getattr(result, "backend", "fallback")
+        reason = getattr(result, "fallback_reason", None)
+        if backend == "auto" and "backend" not in scpc_parameters:
+            reason = "scpc_backend_api_unavailable"
+        if reason is not None:
+            fallback_reasons[stage] = reason
 
     return PipelineResult(
-        tests=Tests(
-            i0=i0,
-            i1=i1,
-            i0resid=i0resid,
-            i1resid=i1resid,
-        ),
-        fits=Fits(
-            levels=RegressionResult(
-                model=levels_model,
-                scpc=levels_scpc,
-            ),
-            transformed=RegressionResult(
-                model=transformed_model,
-                scpc=transformed_scpc,
-            ),
-        ),
-        backend=pipe_backend,
-        tied=pipe_tied,
+        tests=Tests(tests["i0"], tests["i1"], tests["i0resid"], tests["i1resid"]),
+        fits=Fits(levels=fits["levels_scpc"], transformed=fits["transformed_scpc"]),
+        backend="rust"
+        if all(x == "rust" for x in stage_backends.values())
+        else "fallback",
+        tied=any(result.tied for result in tests.values())
+        or any(bool(getattr(fit.scpc, "tied", False)) for fit in fits.values()),
+        stage_backends=stage_backends,
+        fallback_reasons=fallback_reasons,
     )
-
-
-_ORIG_SPURTEST_I0 = spurtest_i0
-_ORIG_SPURTEST_I1 = spurtest_i1
-_ORIG_SPURTEST_I0RESID = spurtest_i0resid
-_ORIG_SPURTEST_I1RESID = spurtest_i1resid
-_ORIG_SPURTRANSFORM = spurtransform

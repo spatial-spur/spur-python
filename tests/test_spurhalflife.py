@@ -145,3 +145,14 @@ def test_spurhalflife_matches_stata(
             st_value["ci_upper"], abs=HALFLIFE_ATOL
         )
     assert py_value.max_dist == pytest.approx(st_value["max_dist"], abs=HALFLIFE_ATOL)
+
+
+def test_spurhalflife_reports_euclidean_units_with_small_distances() -> None:
+    rng = np.random.default_rng(67)
+    df = pd.DataFrame(rng.uniform(size=(20, 3)), columns=["sx", "sy", "y"])
+    df[["sx", "sy"]] *= 1e-150
+    result = spurhalflife(
+        "y", df, coords_euclidean=("sx", "sy"), q=4, nrep=100, backend="fallback"
+    )
+    assert result.distance_units == "coordinate units"
+    assert "e-150 coordinate units" in result.summary()

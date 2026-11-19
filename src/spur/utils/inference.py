@@ -230,7 +230,7 @@ def get_ha_param_i1_residual(
     return c
 
 
-def c_ci(
+def _half_life_exceedance_counts(
     Y: np.ndarray,
     distmat: np.ndarray,
     emat: np.ndarray,
@@ -238,12 +238,12 @@ def c_ci(
     c_grid_ha: np.ndarray,
 ) -> np.ndarray:
     """
-    Compute p-values over c_grid_ho using LR test with averaged Ha likelihood.
+    Count strict LR exceedances over c_grid_ho using the averaged Ha likelihood.
 
     Returns
     -------
     ndarray (n_c_ho,)
-        P-value at each c in c_grid_ho
+        Number of simulated LR values above the observed LR at each c in c_grid_ho
     """
     q = emat.shape[0]
     n_c_ho = len(c_grid_ho)
@@ -295,7 +295,7 @@ def c_ci(
             "Half-life experiment is uninformative: covariance shapes are proportional."
         )
     X = validate_and_project_y(Y, R)
-    pv_mat = np.zeros(n_c_ho)
+    counts = np.empty(n_c_ho, dtype=np.intp)
 
     for i in range(n_c_ho):
         ch_null = ch_om_list[i]
@@ -326,9 +326,9 @@ def c_ci(
         den_ha_avg_X = den_ha_mat_X.mean()
         lr_X = den_ha_avg_X / den_ho_X
 
-        pv_mat[i] = np.mean(lr > lr_X)
+        counts[i] = np.count_nonzero(lr > lr_X)
 
-    return pv_mat
+    return counts
 
 
 def spur_persistence(
@@ -364,9 +364,11 @@ def spur_persistence(
     c_grid_ho = -np.log(0.5) / hl_grid_ho
     c_grid_ha = -np.log(0.5) / hl_grid_ha
 
-    pv_mat = c_ci(Y, distmat, emat, c_grid_ho, c_grid_ha)
-
-    ii = pv_mat > (1 - level)
+    counts = _half_life_exceedance_counts(Y, distmat, emat, c_grid_ho, c_grid_ha)
+    nrep = emat.shape[1]
+    # p > 1 - level, evaluated on the integer Monte Carlo grid without
+    # subtracting the floating-point confidence level from one.
+    ii = (nrep - counts) / nrep < level
     if not ii.any():
         return np.nan, np.nan
 

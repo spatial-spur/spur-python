@@ -1,8 +1,8 @@
-from typing import Any
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import spur.core as pipeline
 from spur import (
@@ -15,114 +15,161 @@ from spur import (
 )
 
 
-def test_spur_returns_full_pipeline_result(monkeypatch) -> None:
+def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
+    rng = np.random.default_rng(441)
+    n = 30
     df = pd.DataFrame(
         {
-            "lon": [10.0, 11.0, 12.0, 13.0],
-            "lat": [50.0, 51.0, 52.0, 53.0],
-            "y": [1.0, 2.0, 3.0, 4.0],
-            "x": [2.0, 1.0, 0.0, -1.0],
-        }
+            "sx": rng.uniform(size=n),
+            "sy": rng.uniform(size=n),
+            "y": np.exp(rng.normal(size=n)),
+            "x": np.exp(rng.normal(size=n)),
+            "Q": np.arange(n),
+        },
+        index=np.repeat(np.arange(n // 2), 2),
     )
+    # Missing coordinates on a row omitted by the formula do not enter any stage.
+    df.iloc[4, [0, 3]] = np.nan
+    keep = np.arange(n) != 4
+    draws_seen = []
+    tests_seen = {}
 
-    i0 = SimpleNamespace(name="i0")
-    i1 = SimpleNamespace(name="i1")
-    i0resid = SimpleNamespace(name="i0resid")
-    i1resid = SimpleNamespace(name="i1resid")
+    def fake_test(test_type, response, distances, draws, basis, **kwargs):
+        tests_seen[test_type] = (response, distances, basis)
+        draws_seen.append(draws)
+        return TestResult(test_type, 1.0, 1.0, np.array([1.0, 2.0, 3.0]), 0.01)
 
-    monkeypatch.setattr(pipeline, "spurtest_i0", lambda *args, **kwargs: i0)
-    monkeypatch.setattr(pipeline, "spurtest_i1", lambda *args, **kwargs: i1)
-    monkeypatch.setattr(pipeline, "spurtest_i0resid", lambda *args, **kwargs: i0resid)
-    monkeypatch.setattr(pipeline, "spurtest_i1resid", lambda *args, **kwargs: i1resid)
-    monkeypatch.setattr(
-        pipeline,
-        "spurtransform",
-        lambda *args, **kwargs: df.assign(h_y=df["y"], h_x=df["x"]),
-    )
+    monkeypatch.setattr(pipeline, "_fallback_spur_test", fake_test)
 
-    scpc_calls: list[dict[str, Any]] = []
+    scpc_calls = []
 
+    # Older SCPC releases expose pure Python inference without a backend option.
     def fake_scpc(model, data, **kwargs):
-        call = {
-            "formula": model.model.formula,
-            "rows": len(data),
-            "cols": list(data.columns),
-            "kwargs": kwargs,
-        }
-        scpc_calls.append(call)
-        return call
+        scpc_calls.append((model, data, kwargs))
+        return SimpleNamespace(backend="fallback")
 
     monkeypatch.setattr(pipeline, "scpc", fake_scpc)
-
-    result = spur("y ~ x", df, lon="lon", lat="lat", q=10, nrep=200, seed=42)
+    result = spur(
+        "np.log(y) ~ np.log(x)",
+        df,
+        coords_euclidean=("sx", "sy"),
+        q=3,
+        nrep=20,
+        seed=42,
+        backend="fallback",
+    )
 
     assert isinstance(result, PipelineResult)
-    assert result.tests.i0 is i0
-    assert result.tests.i1 is i1
-    assert result.tests.i0resid is i0resid
-    assert result.tests.i1resid is i1resid
-    assert result.fits.levels.model.model.formula == "y ~ x"
-    assert result.fits.transformed.model.model.formula == "h_y ~ h_x"
-    assert result.fits.levels.scpc["formula"] == "y ~ x"
-    assert result.fits.transformed.scpc["formula"] == "h_y ~ h_x"
+    assert set(tests_seen) == {"i0", "i1", "i0resid", "i1resid"}
+    assert all(draws is draws_seen[0] for draws in draws_seen)
+    expected_y = np.log(df["y"].to_numpy()[keep])
+    expected_x = np.log(df["x"].to_numpy()[keep])
+    for response, distances, _ in tests_seen.values():
+        np.testing.assert_allclose(response, expected_y)
+        assert distances.shape == (n - 1, n - 1)
+    h = pipeline.lbmgls_matrix(df[["sx", "sy"]].to_numpy()[keep], latlon=False)
+    assert result.fits.levels.model.nobs == result.fits.transformed.model.nobs == n - 1
+    np.testing.assert_allclose(
+        result.fits.transformed.model.model.endog, h @ expected_y
+    )
+    np.testing.assert_allclose(
+        result.fits.transformed.model.model.exog[:, 1], h @ expected_x
+    )
     assert len(scpc_calls) == 2
+    for _, frame, kwargs in scpc_calls:
+        assert len(frame) == n - 1
+        assert kwargs["coords_euclidean"] == ("sx", "sy")
+    assert set(result.stage_backends.values()) == {"fallback"}
+    assert result.fallback_reasons == {}
 
 
-def test_spur_passes_coordinate_kwargs_to_both_scpc_calls(monkeypatch) -> None:
-    df = pd.DataFrame(
-        {
-            "lon": [10.0, 11.0, 12.0, 13.0],
-            "lat": [50.0, 51.0, 52.0, 53.0],
-            "y": [1.0, 2.0, 3.0, 4.0],
-            "x": [2.0, 1.0, 0.0, -1.0],
+def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
+    monkeypatch,
+) -> None:
+    rng = np.random.default_rng(600)
+    df = pd.DataFrame(rng.normal(size=(12, 4)), columns=["sx", "sy", "y", "x"])
+    native_output = {
+        "lr": [1.0],
+        "pvalue": [0.5],
+        "cvalue": [1.0, 2.0, 3.0],
+        "ha_param": 0.1,
+        "pvalue_mat": [0.5],
+        "cvalue_mat": [[1.0, 2.0, 3.0]],
+        "rho_grid": [0.001],
+        "tied": False,
+    }
+
+    def fake_pipeline(*args, **kwargs):
+        return {
+            "i0": native_output,
+            "i1": native_output,
+            "i0resid": dict(native_output, tied=True),
+            "i1resid": dict(native_output, tied=True),
+            "transformed_vars": args[-1],
         }
-    )
 
     monkeypatch.setattr(
-        pipeline, "spurtest_i0", lambda *args, **kwargs: SimpleNamespace()
-    )
-    monkeypatch.setattr(
-        pipeline, "spurtest_i1", lambda *args, **kwargs: SimpleNamespace()
-    )
-    monkeypatch.setattr(
-        pipeline, "spurtest_i0resid", lambda *args, **kwargs: SimpleNamespace()
-    )
-    monkeypatch.setattr(
-        pipeline, "spurtest_i1resid", lambda *args, **kwargs: SimpleNamespace()
+        pipeline,
+        "load_rust_backend",
+        lambda: SimpleNamespace(run_spur_pipeline=fake_pipeline),
     )
     monkeypatch.setattr(
         pipeline,
-        "spurtransform",
-        lambda *args, **kwargs: df.assign(h_y=df["y"], h_x=df["x"]),
+        "_fallback_spur_test",
+        lambda test_type, *args, tied, fallback_reason: TestResult(
+            test_type,
+            1.0,
+            1.0,
+            np.array([1.0, 2.0, 3.0]),
+            0.01,
+            tied=tied,
+            fallback_reason=fallback_reason,
+        ),
     )
 
-    scpc_calls: list[dict[str, Any]] = []
-
-    def fake_scpc(model, data, **kwargs):
-        scpc_calls.append(
-            {
-                "formula": model.model.formula,
-                "cols": list(data.columns),
-                "kwargs": kwargs,
-            }
-        )
-        return {"ok": True}
+    def fake_scpc(model, data, *, backend=None, nthreads=None, **kwargs):
+        return SimpleNamespace(backend="rust")
 
     monkeypatch.setattr(pipeline, "scpc", fake_scpc)
+    result = spur(
+        "y ~ x", df, coords_euclidean=("sx", "sy"), q=2, nrep=10, backend="auto"
+    )
 
-    spur("y ~ x", df, lon="lon", lat="lat", q=10, nrep=200, seed=42)
+    assert result.fits.levels.model.model.formula == "y ~ x"
+    assert result.fits.transformed.model.model.formula == "h_y ~ h_x"
+    assert result.backend == "fallback"
+    assert result.tied
+    assert result.stage_backends == {
+        "i0": "rust",
+        "i1": "rust",
+        "i0resid": "fallback",
+        "i1resid": "fallback",
+        "transform": "rust",
+        "levels_scpc": "rust",
+        "transformed_scpc": "rust",
+    }
+    assert result.fallback_reasons == {
+        "i0resid": "tied_eigenspace",
+        "i1resid": "tied_eigenspace",
+    }
 
-    assert len(scpc_calls) == 2
-    assert scpc_calls[0]["kwargs"]["lon"] == "lon"
-    assert scpc_calls[0]["kwargs"]["lat"] == "lat"
-    assert scpc_calls[0]["kwargs"]["coords_euclidean"] is None
-    assert scpc_calls[1]["kwargs"]["lon"] == "lon"
-    assert scpc_calls[1]["kwargs"]["lat"] == "lat"
-    assert scpc_calls[1]["kwargs"]["coords_euclidean"] is None
-    assert scpc_calls[0]["formula"] == "y ~ x"
-    assert scpc_calls[1]["formula"] == "h_y ~ h_x"
-    assert "h_y" in scpc_calls[1]["cols"]
-    assert "h_x" in scpc_calls[1]["cols"]
+
+@pytest.mark.parametrize(
+    ("formula", "response", "message"),
+    [
+        ("y ~ x", [1.0, 2.0, 3.0, np.inf], "must be finite"),
+        ("y ~ 0 + C(g)", [1.0, 2.0, 3.0, 4.0], "spans a constant"),
+    ],
+)
+def test_spur_validates_design_before_ols_fit(monkeypatch, formula, response, message):
+    df = pd.DataFrame({"y": response, "x": [1, 2, 5, 3], "g": ["a", "b", "b", "a"]})
+
+    def unexpected_fit(*args, **kwargs):
+        pytest.fail("spur() fitted OLS before validating the design")
+
+    monkeypatch.setattr("statsmodels.regression.linear_model.OLS.fit", unexpected_fit)
+    with pytest.raises(ValueError, match=message):
+        spur(formula, df, q=2, backend="fallback")
 
 
 def test_pipeline_result_summary_formats_comparison_table() -> None:

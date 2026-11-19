@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -10,9 +9,11 @@ import pytest
 
 import spur
 import spur.core as spur_core
+from tests.config import BENCH_200
 
-BENCH_200 = (
-    Path(__file__).resolve().parents[2] / "verification" / "data" / "bench_200.csv"
+pytestmark = pytest.mark.skipif(
+    spur_core.load_rust_backend() is None,
+    reason="compatible spatial-spur-rust extension unavailable",
 )
 
 
@@ -396,3 +397,43 @@ def test_backend_validation_and_env_override(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(RuntimeError, match="spatial_spur_rust"):
         spur.spurtest_i1("y", df, lon="s_1", lat="s_2", q=8, nrep=400, backend="rust")
     _: Any = res_fb
+
+
+def test_spur_pipeline_native_fallback_parity_on_evaluated_complete_cases() -> None:
+    df = _load_bench_df().iloc[:120].copy()
+    df["log_y_input"] = np.exp(df["y"])
+    df["log_x_input"] = np.exp(df["x1"])
+    df.loc[2, ["log_x_input", "s_1"]] = np.nan
+    common: dict[str, Any] = dict(
+        coords_euclidean=("s_1", "s_2"),
+        nthreads=1,
+        q=8,
+        nrep=400,
+    )
+    formula = "np.log(log_y_input) ~ np.log(log_x_input) + x2"
+    fb = spur.spur(formula, df, backend="fallback", **common)
+    ru = spur.spur(formula, df, backend="rust", **common)
+    assert fb.backend == "fallback" and ru.backend == "rust"
+    assert set(ru.stage_backends.values()) == {"rust"}
+    for stage in ("i0", "i1", "i0resid", "i1resid"):
+        a, b = getattr(fb.tests, stage), getattr(ru.tests, stage)
+        npt.assert_allclose(b.cv, a.cv, rtol=1e-8, atol=1e-8)
+        assert b.pvalue == a.pvalue
+    for stage in ("levels", "transformed"):
+        a, b = getattr(fb.fits, stage), getattr(ru.fits, stage)
+        assert a.model.nobs == b.model.nobs == 119
+        npt.assert_allclose(b.scpc.scpcstats, a.scpc.scpcstats, rtol=1e-8, atol=1e-8)
+
+
+def test_spur_nn_all_colocated_uses_other_sites_as_neighbors() -> None:
+    df = pd.DataFrame({"x": [0.0] * 3, "s": [1.0] * 3, "y": [1.0, 2.0, 6.0]})
+    for backend in ("fallback", "rust"):
+        transformed = spur.spurtransform(
+            "y ~ 1",
+            df,
+            coords_euclidean=("x", "s"),
+            transformation="nn",
+            backend=backend,
+            nthreads=1,
+        )
+        npt.assert_allclose(transformed["h_y"], [-3, -1.5, 4.5])

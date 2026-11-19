@@ -100,3 +100,21 @@ def test_spur_persistence_matches_stata(
         assert py_upper == 100.0
     else:
         assert py_upper == pytest.approx(st_upper, abs=HALFLIFE_ATOL)
+
+
+@pytest.mark.parametrize(
+    ("level", "nrep", "first_accepted"),
+    [(0.9, 10, 1), (0.95, 20, 1), (0.91, 10, 0)],
+)
+def test_spur_persistence_excludes_exact_nominal_threshold(
+    monkeypatch, level: float, nrep: int, first_accepted: int
+) -> None:
+    from spur.utils import inference
+
+    counts = np.zeros(131, dtype=int)
+    counts[:2] = [1, 2]
+    monkeypatch.setattr(inference, "_half_life_exceedance_counts", lambda *args: counts)
+    lower, upper = spur_persistence(np.ones(2), np.eye(2), np.ones((2, nrep)), level)
+    grid = np.linspace(0.001, 1, 100)
+    assert lower == grid[first_accepted]
+    assert upper == grid[1]

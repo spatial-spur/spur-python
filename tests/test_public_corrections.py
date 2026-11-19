@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -6,9 +5,20 @@ import pandas as pd
 import pytest
 
 import spur
+from spur.core import load_rust_backend
+from tests.config import BENCH_200
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+RUST_AVAILABLE = load_rust_backend() is not None
+RUST_PARAMETER = pytest.param(
+    "rust",
+    marks=pytest.mark.skipif(
+        not RUST_AVAILABLE, reason="compatible native extension unavailable"
+    ),
+)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_residual_dimension_and_units(backend):
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
@@ -24,7 +34,7 @@ def test_residual_dimension_and_units(backend):
         spur.spurhalflife("constant", d.assign(constant=5.0), q=4, **kw)
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_regressor_scale_and_half_life_units(backend):
     rng = np.random.default_rng(2026)
     d = pd.DataFrame({k: rng.normal(size=100) for k in ["y", "x", "sx", "sy"]})
@@ -53,17 +63,16 @@ def test_regressor_scale_and_half_life_units(backend):
     assert scaled.max_dist == pytest.approx(290)
 
 
-def test_public_seeded_residual_parity_and_host_rng():
-    d = pd.read_csv(
-        Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
-    )
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_public_seeded_residual_parity_and_host_rng(backend):
+    d = pd.read_csv(BENCH_200)
     kw: dict[str, Any] = dict(coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42)
     np.random.seed(101)
     state = np.random.get_state(legacy=True)
     assert isinstance(state, tuple)
     a = spur.spurtest_i0resid("y ~ x1 + x2", d, backend="fallback", **kw)
     middle = np.random.get_state(legacy=True)
-    b = spur.spurtest_i0resid("y ~ x1 + x2", d, backend="rust", **kw)
+    b = spur.spurtest_i0resid("y ~ x1 + x2", d, backend=backend, **kw)
     after = np.random.get_state(legacy=True)
     for result in [middle, after]:
         assert isinstance(result, tuple)
@@ -74,7 +83,7 @@ def test_public_seeded_residual_parity_and_host_rng():
     )
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_uninformative_symmetric_geometry(backend):
     d = pd.DataFrame(
         {"sx": [0.0, 1.0, 0.5], "sy": [0.0, 0.0, np.sqrt(3) / 2], "y": [1.0, 2.0, 4.0]}
@@ -87,7 +96,7 @@ def test_uninformative_symmetric_geometry(backend):
             fn("y", d, **options)
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_geographic_half_life_uses_metres(backend):
     d = pd.DataFrame({"lon": np.arange(30.0), "lat": 0.0, "y": np.sin(np.arange(30.0))})
     opts: dict[str, Any] = dict(
@@ -99,7 +108,7 @@ def test_geographic_half_life_uses_metres(backend):
     assert absolute.ci_lower == pytest.approx(normalized.ci_lower * absolute.max_dist)
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_residual_dimension_boundary_is_valid(backend):
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
@@ -124,11 +133,9 @@ def test_power_calibration_reports_unbracketable_experiment(monkeypatch):
         inference.get_ha_param_i0(np.eye(2), np.eye(2), np.eye(2), np.ones((2, 10)))
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_response_shift_does_not_change_inference(backend):
-    d = pd.read_csv(
-        Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
-    )
+    d = pd.read_csv(BENCH_200)
     options: dict[str, Any] = dict(
         coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42, backend=backend
     )
@@ -141,7 +148,7 @@ def test_response_shift_does_not_change_inference(backend):
     )
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_insufficient_positive_covariance_rank_is_rejected(backend):
     rng = np.random.default_rng(83)
     d = pd.DataFrame(
@@ -159,7 +166,7 @@ def test_insufficient_positive_covariance_rank_is_rejected(backend):
         )
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_zero_projected_signal_is_rejected(backend):
     from spur.utils.dist import normalized_distmat
     from spur.utils.matrix import demean_matrix, get_r, get_sigma_lbm
@@ -181,7 +188,7 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
     import scpc.core as scpc_core
     import spur.core as spur_core
 
-    stale = SimpleNamespace(API_VERSION=5, SPUR_API_VERSION=1)
+    stale = SimpleNamespace(API_VERSION=6, SPUR_API_VERSION=2)
     original_import = importlib.import_module
     monkeypatch.setattr(
         importlib,
@@ -193,7 +200,8 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
         ),
     )
     assert spur_core.load_rust_backend() is None
-    assert scpc_core.load_rust_backend() is stale
+    if getattr(scpc_core, "RUST_API_VERSION", None) == 6:
+        assert scpc_core.load_rust_backend() is stale
 
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
@@ -203,7 +211,8 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
     )
     result = spur.spurtest_i0resid("y ~ x", d, q=10, backend="auto", **opts)
     assert result.backend == "fallback"
-    with pytest.raises(RuntimeError, match="unavailable or incompatible"):
+    assert result.fallback_reason == "missing_or_incompatible_native_extension"
+    with pytest.raises(RuntimeError, match=r"spatial-spur-rust >= 0\.2\.3"):
         spur.spurtest_i0resid("y ~ x", d, q=10, backend="rust", **opts)
     with pytest.raises(ValueError, match="residual dimension"):
         spur.spurtest_i0resid("y ~ x", d, q=11, backend="auto", **opts)
@@ -216,15 +225,13 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
 
 @pytest.mark.parametrize("scale", [1e200, -1e200])
 def test_large_response_scale_native_fallback_parity(scale):
-    d = pd.read_csv(
-        Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
-    )
+    d = pd.read_csv(BENCH_200)
     options: dict[str, Any] = dict(
         coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42
     )
     baseline = spur.spurtest_i0resid("y ~ x1 + x2", d, backend="fallback", **options)
     data_scaled = d.assign(y=d.y * scale)
-    for backend in ("fallback", "rust"):
+    for backend in ("fallback", "rust") if RUST_AVAILABLE else ("fallback",):
         actual = spur.spurtest_i0resid(
             "y ~ x1 + x2", data_scaled, backend=backend, **options
         )
@@ -235,11 +242,9 @@ def test_large_response_scale_native_fallback_parity(scale):
         )
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_tiny_coordinate_scale_invariance(backend):
-    d = pd.read_csv(
-        Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
-    )
+    d = pd.read_csv(BENCH_200)
     d_tiny = d.assign(s_1=d.s_1 * 1e-12, s_2=d.s_2 * 1e-12)
     test_opts: dict[str, Any] = dict(
         coords_euclidean=["s_1", "s_2"], q=8, nrep=500, seed=42, backend=backend

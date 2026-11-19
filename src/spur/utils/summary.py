@@ -56,7 +56,7 @@ def format_comparison_header_row(
 def collect_coefficient_rows(result: PipelineResult) -> list[tuple[str, str, str]]:
     """Collect formatted coefficient and standard-error rows."""
     levels_names = [str(name) for name in result.fits.levels.model.params.index]
-    transformed_names = [
+    transformed_names = result.fits.transformed.coefficient_labels or [
         display_term_name(str(name))
         for name in result.fits.transformed.model.params.index
     ]
