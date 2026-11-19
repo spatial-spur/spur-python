@@ -345,10 +345,10 @@ def lbmgls_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     small = 1e-10
 
     distmat = get_distance_matrix(coords, latlon=latlon)
-    max_dist = distmat.max()
-    if max_dist <= 1e-10:
+    max_dist = float(distmat.max())
+    if not np.isfinite(max_dist) or max_dist <= 0.0:
         raise ValueError(
-            "All coordinates are identical (or nearly so) — LBM-GLS normalization "
+            "All coordinates are identical — LBM-GLS normalization "
             "requires distinct locations."
         )
     distmat = distmat / max_dist

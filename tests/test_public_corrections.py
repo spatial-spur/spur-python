@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,9 @@ def test_residual_dimension_and_units(backend):
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
     d["x"] = rng.normal(size=12)
-    kw = dict(coords_euclidean=["sx", "sy"], nrep=100, seed=3, backend=backend)
+    kw: dict[str, Any] = dict(
+        coords_euclidean=["sx", "sy"], nrep=100, seed=3, backend=backend
+    )
     with pytest.raises(ValueError, match="residual dimension"):
         spur.spurtest_i0resid("y ~ x", d, q=11, **kw)
     with pytest.raises(ValueError, match=">= 2"):
@@ -25,7 +28,9 @@ def test_residual_dimension_and_units(backend):
 def test_regressor_scale_and_half_life_units(backend):
     rng = np.random.default_rng(2026)
     d = pd.DataFrame({k: rng.normal(size=100) for k in ["y", "x", "sx", "sy"]})
-    kw = dict(coords_euclidean=["sx", "sy"], q=8, nrep=100, seed=7, backend=backend)
+    kw: dict[str, Any] = dict(
+        coords_euclidean=["sx", "sy"], q=8, nrep=100, seed=7, backend=backend
+    )
     a = spur.spurtest_i0resid("y ~ x", d, **kw)
     b = spur.spurtest_i0resid("y ~ x", d.assign(x=d.x * 1e-12), **kw)
     np.testing.assert_allclose(
@@ -34,7 +39,9 @@ def test_regressor_scale_and_half_life_units(backend):
     line = pd.DataFrame(
         {"sx": np.arange(30.0), "sy": 0.0, "y": np.sin(np.arange(30.0))}
     )
-    opts = dict(coords_euclidean=["sx", "sy"], q=4, nrep=99, seed=42, backend=backend)
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["sx", "sy"], q=4, nrep=99, seed=42, backend=backend
+    )
     h = spur.spurhalflife("y", line, normdist=True, **opts)
     absolute = spur.spurhalflife("y", line, normdist=False, **opts)
     scaled = spur.spurhalflife(
@@ -50,14 +57,16 @@ def test_public_seeded_residual_parity_and_host_rng():
     d = pd.read_csv(
         Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
     )
-    kw = dict(coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42)
+    kw: dict[str, Any] = dict(coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42)
     np.random.seed(101)
-    state = np.random.get_state()
+    state = np.random.get_state(legacy=True)
+    assert isinstance(state, tuple)
     a = spur.spurtest_i0resid("y ~ x1 + x2", d, backend="fallback", **kw)
-    middle = np.random.get_state()
+    middle = np.random.get_state(legacy=True)
     b = spur.spurtest_i0resid("y ~ x1 + x2", d, backend="rust", **kw)
-    after = np.random.get_state()
+    after = np.random.get_state(legacy=True)
     for result in [middle, after]:
+        assert isinstance(result, tuple)
         assert result[0] == state[0] and result[2:] == state[2:]
         np.testing.assert_array_equal(result[1], state[1])
     np.testing.assert_allclose(
@@ -70,7 +79,9 @@ def test_uninformative_symmetric_geometry(backend):
     d = pd.DataFrame(
         {"sx": [0.0, 1.0, 0.5], "sy": [0.0, 0.0, np.sqrt(3) / 2], "y": [1.0, 2.0, 4.0]}
     )
-    options = dict(coords_euclidean=["sx", "sy"], q=2, nrep=20, seed=3, backend=backend)
+    options: dict[str, Any] = dict(
+        coords_euclidean=["sx", "sy"], q=2, nrep=20, seed=3, backend=backend
+    )
     for fn in (spur.spurtest_i0, spur.spurtest_i1, spur.spurhalflife):
         with pytest.raises(ValueError, match="uninformative"):
             fn("y", d, **options)
@@ -79,7 +90,9 @@ def test_uninformative_symmetric_geometry(backend):
 @pytest.mark.parametrize("backend", ["fallback", "rust"])
 def test_geographic_half_life_uses_metres(backend):
     d = pd.DataFrame({"lon": np.arange(30.0), "lat": 0.0, "y": np.sin(np.arange(30.0))})
-    opts = dict(lon="lon", lat="lat", q=4, nrep=99, seed=42, backend=backend)
+    opts: dict[str, Any] = dict(
+        lon="lon", lat="lat", q=4, nrep=99, seed=42, backend=backend
+    )
     normalized = spur.spurhalflife("y", d, normdist=True, **opts)
     absolute = spur.spurhalflife("y", d, normdist=False, **opts)
     assert absolute.max_dist == pytest.approx(6_371_000 * np.deg2rad(29))
@@ -116,7 +129,7 @@ def test_response_shift_does_not_change_inference(backend):
     d = pd.read_csv(
         Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
     )
-    options = dict(
+    options: dict[str, Any] = dict(
         coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42, backend=backend
     )
     baseline = spur.spurtest_i0resid("y ~ x1 + x2", d, **options)
@@ -185,18 +198,20 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
     d["x"] = rng.normal(size=12)
-    opts = dict(coords_euclidean=["sx", "sy"], q=10, nrep=500, seed=3, nthreads=1)
-    result = spur.spurtest_i0resid("y ~ x", d, backend="auto", **opts)
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["sx", "sy"], nrep=500, seed=3, nthreads=1
+    )
+    result = spur.spurtest_i0resid("y ~ x", d, q=10, backend="auto", **opts)
     assert result.backend == "fallback"
     with pytest.raises(RuntimeError, match="unavailable or incompatible"):
-        spur.spurtest_i0resid("y ~ x", d, backend="rust", **opts)
+        spur.spurtest_i0resid("y ~ x", d, q=10, backend="rust", **opts)
     with pytest.raises(ValueError, match="residual dimension"):
-        spur.spurtest_i0resid("y ~ x", d, backend="auto", **(opts | {"q": 11}))
+        spur.spurtest_i0resid("y ~ x", d, q=11, backend="auto", **opts)
     triangle = pd.DataFrame(
         {"sx": [0.0, 1.0, 0.5], "sy": [0.0, 0.0, np.sqrt(3) / 2], "y": [1.0, 2.0, 4.0]}
     )
     with pytest.raises(ValueError, match="uninformative"):
-        spur.spurtest_i0("y", triangle, backend="auto", **(opts | {"q": 2}))
+        spur.spurtest_i0("y", triangle, q=2, backend="auto", **opts)
 
 
 @pytest.mark.parametrize("scale", [1e200, -1e200])
@@ -204,7 +219,9 @@ def test_large_response_scale_native_fallback_parity(scale):
     d = pd.read_csv(
         Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
     )
-    options = dict(coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42)
+    options: dict[str, Any] = dict(
+        coords_euclidean=["s_1", "s_2"], q=8, nrep=1000, seed=42
+    )
     baseline = spur.spurtest_i0resid("y ~ x1 + x2", d, backend="fallback", **options)
     data_scaled = d.assign(y=d.y * scale)
     for backend in ("fallback", "rust"):
@@ -216,3 +233,69 @@ def test_large_response_scale_native_fallback_parity(scale):
             [baseline.LR, baseline.ha_param, baseline.pvalue],
             atol=1e-9,
         )
+
+
+@pytest.mark.parametrize("backend", ["fallback", "rust"])
+def test_tiny_coordinate_scale_invariance(backend):
+    d = pd.read_csv(
+        Path(__file__).resolve().parents[2] / "verification/data/bench_200.csv"
+    )
+    d_tiny = d.assign(s_1=d.s_1 * 1e-12, s_2=d.s_2 * 1e-12)
+    test_opts: dict[str, Any] = dict(
+        coords_euclidean=["s_1", "s_2"], q=8, nrep=500, seed=42, backend=backend
+    )
+    res_orig = spur.spurtest_i0resid("y ~ x1 + x2", d, **test_opts)
+    res_tiny = spur.spurtest_i0resid("y ~ x1 + x2", d_tiny, **test_opts)
+    assert res_orig.backend == backend
+    assert res_tiny.backend == backend
+    np.testing.assert_allclose(
+        [res_tiny.LR, res_tiny.ha_param, res_tiny.pvalue],
+        [res_orig.LR, res_orig.ha_param, res_orig.pvalue],
+        rtol=1e-10,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(res_tiny.cv, res_orig.cv, rtol=1e-10, atol=1e-12)
+
+    hl_opts: dict[str, Any] = dict(
+        coords_euclidean=["s_1", "s_2"], q=6, nrep=200, seed=42, backend=backend
+    )
+    for normdist in (True, False):
+        hl_orig = spur.spurhalflife("y", d, normdist=normdist, **hl_opts)
+        hl_tiny = spur.spurhalflife("y", d_tiny, normdist=normdist, **hl_opts)
+        assert hl_orig.backend == backend
+        assert hl_tiny.backend == backend
+        assert hl_tiny.max_dist < 1e-10
+        np.testing.assert_allclose(
+            hl_tiny.max_dist, hl_orig.max_dist * 1e-12, rtol=1e-10, atol=0.0
+        )
+        scale = 1.0 if normdist else 1e-12
+        if np.isnan(hl_orig.ci_lower):
+            assert np.isnan(hl_tiny.ci_lower)
+        else:
+            np.testing.assert_allclose(
+                hl_tiny.ci_lower, hl_orig.ci_lower * scale, rtol=1e-10, atol=0.0
+            )
+        if np.isinf(hl_orig.ci_upper):
+            assert np.isinf(hl_tiny.ci_upper)
+        else:
+            np.testing.assert_allclose(
+                hl_tiny.ci_upper, hl_orig.ci_upper * scale, rtol=1e-10, atol=0.0
+            )
+
+    tr_orig = spur.spurtransform(
+        "y ~ x1",
+        d,
+        coords_euclidean=["s_1", "s_2"],
+        transformation="lbmgls",
+        backend=backend,
+    )
+    tr_tiny = spur.spurtransform(
+        "y ~ x1",
+        d_tiny,
+        coords_euclidean=["s_1", "s_2"],
+        transformation="lbmgls",
+        backend=backend,
+    )
+    np.testing.assert_allclose(
+        tr_tiny["h_y"].to_numpy(), tr_orig["h_y"].to_numpy(), rtol=1e-9, atol=1e-9
+    )

@@ -1304,15 +1304,13 @@ def spurhalflife(
 
     distmat_raw = get_distance_matrix(coords, latlon=latlon)
 
-    max_dist_norm = distmat_raw.max()
-    if max_dist_norm <= 1e-10:
+    max_dist = float(distmat_raw.max())
+    if not np.isfinite(max_dist) or max_dist <= 0.0:
         raise ValueError(
-            "All coordinates are identical (or nearly so) — half-life normalization "
+            "All coordinates are identical — half-life normalization "
             "requires distinct locations."
         )
-    distmat = distmat_raw / max_dist_norm
-
-    max_dist = distmat_raw.max()
+    distmat = distmat_raw / max_dist
 
     ci_l, ci_u = spur_persistence(Y, distmat, emat, level / 100)
 
