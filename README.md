@@ -133,6 +133,10 @@ the prefix and evaluated column names. Rows excluded by the formula have missing
 values in those columns. `spurhalflife()` also reports `fallback_reason` when
 automatic dispatch uses the Python implementation.
 
+The standard Arm64 native build can use OxiBLAS's SME2 kernels automatically
+on supported systems. Set `OXIBLAS_DISABLE_SME2=1` before starting Python to
+use regular CPU dispatch.
+
 The Rust backend in this development branch requires SPUR API 3 and SCPC API 6
 (`spatial-spur-rust` 0.2.3). To test it before the compatible wheel is
 published, install from the matching shared-core checkout. The full pipeline
