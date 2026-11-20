@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import importlib
-from inspect import signature
+from inspect import Parameter, signature
 import math
 import os
 from typing import Any, Literal, Optional
 
 import numpy as np
 import pandas as pd
+from patsy.eval import EvalEnvironment
 from scpc import scpc
 import statsmodels.formula.api as smf
 from statsmodels.tools.sm_exceptions import MissingDataError
@@ -29,6 +30,7 @@ from .utils.dist import (
 )
 from .utils.formula import (
     evaluate_formula,
+    intercept_columns,
     parse_residual_formula,
     parse_single_var_formula,
 )
@@ -644,6 +646,46 @@ def spurtest_i0(
     )
 
 
+def _run_residual_formula_test(
+    test_type: str,
+    formula: str,
+    data: pd.DataFrame,
+    eval_env: EvalEnvironment,
+    lon: str | None,
+    lat: str | None,
+    coords_euclidean: Sequence[str] | None,
+    q: int,
+    nrep: int,
+    seed: int,
+    backend: str | None,
+    nthreads: int | None,
+) -> TestResult:
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("`data` must be a pandas DataFrame.")
+    parsed = parse_residual_formula(
+        formula, data, f"spurtest_{test_type}()", eval_env=eval_env
+    )
+    coord_info = resolve_spur_coords(
+        data=data,
+        use_rows=parsed["use_rows"],
+        lon=lon,
+        lat=lat,
+        coords_euclidean=coords_euclidean,
+    )
+    return _run_spur_test(
+        test_type,
+        coord_info["coords"],
+        coord_info["latlong"],
+        parsed["Y"].reshape(-1),
+        q,
+        nrep,
+        seed,
+        resolve_backend(backend),
+        validate_nthreads(nthreads),
+        x_in=parsed["X_in"],
+    )
+
+
 def spurtest_i1resid(
     formula: str,
     data: pd.DataFrame,
@@ -700,30 +742,19 @@ def spurtest_i1resid(
         ... )
         >>> print(result.summary())
     """
-    if not isinstance(data, pd.DataFrame):
-        raise ValueError("`data` must be a pandas DataFrame.")
-
-    parsed = parse_residual_formula(formula, data, "spurtest_i1resid()")
-    coord_info = resolve_spur_coords(
-        data=data,
-        use_rows=parsed["use_rows"],
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-    )
-
-    Y = parsed["Y"].reshape(-1)
-    return _run_spur_test(
+    return _run_residual_formula_test(
         "i1resid",
-        coord_info["coords"],
-        coord_info["latlong"],
-        Y,
+        formula,
+        data,
+        EvalEnvironment.capture(1),
+        lon,
+        lat,
+        coords_euclidean,
         q,
         nrep,
         seed,
-        resolve_backend(backend),
-        validate_nthreads(nthreads),
-        x_in=parsed["X_in"],
+        backend,
+        nthreads,
     )
 
 
@@ -783,30 +814,19 @@ def spurtest_i0resid(
         ... )
         >>> print(result.summary())
     """
-    if not isinstance(data, pd.DataFrame):
-        raise ValueError("`data` must be a pandas DataFrame.")
-
-    parsed = parse_residual_formula(formula, data, "spurtest_i0resid()")
-    coord_info = resolve_spur_coords(
-        data=data,
-        use_rows=parsed["use_rows"],
-        lon=lon,
-        lat=lat,
-        coords_euclidean=coords_euclidean,
-    )
-
-    Y = parsed["Y"].reshape(-1)
-    return _run_spur_test(
+    return _run_residual_formula_test(
         "i0resid",
-        coord_info["coords"],
-        coord_info["latlong"],
-        Y,
+        formula,
+        data,
+        EvalEnvironment.capture(1),
+        lon,
+        lat,
+        coords_euclidean,
         q,
         nrep,
         seed,
-        resolve_backend(backend),
-        validate_nthreads(nthreads),
-        x_in=parsed["X_in"],
+        backend,
+        nthreads,
     )
 
 
@@ -887,31 +907,20 @@ def spurtest(
             backend=backend,
             nthreads=nthreads,
         )
-    if test == "i0resid":
-        return spurtest_i0resid(
+    if test in {"i0resid", "i1resid"}:
+        return _run_residual_formula_test(
+            test,
             formula,
             data,
-            lon=lon,
-            lat=lat,
-            coords_euclidean=coords_euclidean,
-            q=q,
-            nrep=nrep,
-            seed=seed,
-            backend=backend,
-            nthreads=nthreads,
-        )
-    if test == "i1resid":
-        return spurtest_i1resid(
-            formula,
-            data,
-            lon=lon,
-            lat=lat,
-            coords_euclidean=coords_euclidean,
-            q=q,
-            nrep=nrep,
-            seed=seed,
-            backend=backend,
-            nthreads=nthreads,
+            EvalEnvironment.capture(1),
+            lon,
+            lat,
+            coords_euclidean,
+            q,
+            nrep,
+            seed,
+            backend,
+            nthreads,
         )
     raise ValueError("`test` must be one of 'i0', 'i1', 'i0resid', 'i1resid'.")
 
@@ -977,8 +986,13 @@ def spurtransform(
     """
     if not isinstance(data, pd.DataFrame):
         raise ValueError("`data` must be a pandas DataFrame.")
-    y, x = evaluate_formula(formula, data, allow_no_response=True)
-    variables = pd.concat([y, x.drop(columns="Intercept", errors="ignore")], axis=1)
+    y, x = evaluate_formula(
+        formula, data, eval_env=EvalEnvironment.capture(1), allow_no_response=True
+    )
+    intercept_slice = intercept_columns(getattr(x, "design_info"))
+    if intercept_slice is not None:
+        x = x.drop(columns=x.columns[intercept_slice])
+    variables = pd.concat([y, x], axis=1)
     variables = variables.loc[:, ~variables.columns.duplicated()]
     if variables.shape[1] == 0:
         raise ValueError("No variables found in `formula`.")
@@ -1024,10 +1038,6 @@ def spurtransform(
         )
         coords_raw = coord_info["coords"]
         latlon = coord_info["latlong"]
-        if coords_raw.shape[1] != 2:
-            raise ValueError(
-                f"Distance-based transformations require exactly 2 coordinate columns, got {coords_raw.shape[1]}"
-            )
         if transformation == "iso":
             assert radius is not None, (
                 "radius must be specified for transformation='iso'"
@@ -1049,7 +1059,6 @@ def spurtransform(
             latlong=bool(latlon),
             radius=radius_arg,
             strict_lt=True,
-            exclude_zero_distances=transformation == "iso",
             cluster_id=cluster_codes,
             return_matrix=False,
             demean_lbmgls=False,
@@ -1295,16 +1304,20 @@ def spur(
     rust_mod = _require_rust_if_requested(backend)
     scpc_options: dict[str, Any] = {}
     scpc_parameters = signature(scpc).parameters
-    if "backend" in scpc_parameters:
+    accepts_kwargs = any(
+        param.kind == Parameter.VAR_KEYWORD for param in scpc_parameters.values()
+    )
+    supports_backend = "backend" in scpc_parameters or accepts_kwargs
+    if supports_backend:
         scpc_options["backend"] = backend
     elif backend == "rust":
         raise RuntimeError(
             "Rust execution in spur() requires a compatible SCPC package."
         )
     if nthreads is not None:
-        if "nthreads" in scpc_parameters:
+        if "nthreads" in scpc_parameters or accepts_kwargs:
             scpc_options["nthreads"] = nthreads
-        elif "backend" in scpc_parameters and backend != "fallback":
+        elif supports_backend and backend != "fallback":
             raise RuntimeError(
                 "Selecting a thread count for spur() requires a compatible SCPC package."
             )
@@ -1312,7 +1325,7 @@ def spur(
     if not data.index.is_unique:
         data = data.reset_index(drop=True)
     try:
-        fitted = smf.ols(formula, data=data)
+        fitted = smf.ols(formula, data=data, eval_env=EvalEnvironment.capture(1))
     except MissingDataError as error:
         raise ValueError(
             "The evaluated regression design and response must be finite."
@@ -1323,7 +1336,8 @@ def spur(
     if not np.isfinite(y).all() or not np.isfinite(x).all():
         raise ValueError("The evaluated regression design and response must be finite.")
     design_names = fitted.exog_names
-    intercept = "Intercept" in fitted.data.design_info.term_name_slices
+    intercept_slice = intercept_columns(fitted.data.design_info)
+    intercept = intercept_slice is not None
     design_basis = orthonormal_design_basis(x)
     if not intercept:
         constant = np.ones(len(sample))
@@ -1347,11 +1361,9 @@ def spur(
     coords, latlong = coord_info["coords"], coord_info["latlong"]
     emat = _draw_emat(seed, q, nrep)
 
-    transform_idx = [
-        i
-        for i, name in enumerate(design_names)
-        if not (intercept and name == "Intercept")
-    ]
+    transform_idx = list(range(x.shape[1]))
+    if intercept_slice is not None:
+        del transform_idx[intercept_slice]
     transform_input = np.column_stack((y, x[:, transform_idx]))
     test_types = ("i0", "i1", "i0resid", "i1resid")
 
@@ -1456,7 +1468,7 @@ def spur(
         )
         stage_backends[stage] = getattr(result, "backend", "fallback")
         reason = getattr(result, "fallback_reason", None)
-        if backend == "auto" and "backend" not in scpc_parameters:
+        if not supports_backend and stage_backends[stage] == "fallback":
             reason = "scpc_backend_api_unavailable"
         if reason is not None:
             fallback_reasons[stage] = reason

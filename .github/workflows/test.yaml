@@ -74,4 +74,4 @@ jobs:
         - name: Require both compatible native adapters
           run: uv run --no-sync python -c 'from scpc.core import load_rust_backend as scpc; from spur.core import load_rust_backend as spur; assert scpc() is not None and spur() is not None'
         - name: Test native execution and fallback parity
-          run: uv run --no-sync -m pytest tests/test_rust_spur.py tests/test_public_corrections.py tests/test_spur.py tests/test_spurtransform.py tests/test_spurhalflife.py tests/test_spur_utils.py
+          run: uv run --no-sync -m pytest

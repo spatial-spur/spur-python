@@ -43,14 +43,16 @@ def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
 
     scpc_calls = []
 
-    # Older SCPC releases expose pure Python inference without a backend option.
+    # Wrappers can forward dispatch options through **kwargs.
     def fake_scpc(model, data, **kwargs):
         scpc_calls.append((model, data, kwargs))
         return SimpleNamespace(backend="fallback")
 
     monkeypatch.setattr(pipeline, "scpc", fake_scpc)
+    from numpy import log
+
     result = spur(
-        "np.log(y) ~ np.log(x)",
+        "log(y) ~ log(x)",
         df,
         coords_euclidean=("sx", "sy"),
         q=3,
@@ -62,8 +64,8 @@ def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
     assert isinstance(result, PipelineResult)
     assert set(tests_seen) == {"i0", "i1", "i0resid", "i1resid"}
     assert all(draws is draws_seen[0] for draws in draws_seen)
-    expected_y = np.log(df["y"].to_numpy()[keep])
-    expected_x = np.log(df["x"].to_numpy()[keep])
+    expected_y = log(df["y"].to_numpy()[keep])
+    expected_x = log(df["x"].to_numpy()[keep])
     for response, distances, _ in tests_seen.values():
         np.testing.assert_allclose(response, expected_y)
         assert distances.shape == (n - 1, n - 1)
@@ -79,6 +81,7 @@ def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
     for _, frame, kwargs in scpc_calls:
         assert len(frame) == n - 1
         assert kwargs["coords_euclidean"] == ("sx", "sy")
+        assert kwargs["backend"] == "fallback"
     assert set(result.stage_backends.values()) == {"fallback"}
     assert result.fallback_reasons == {}
 
@@ -127,12 +130,20 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
         ),
     )
 
-    def fake_scpc(model, data, *, backend=None, nthreads=None, **kwargs):
+    def fake_scpc(model, data, **kwargs):
+        assert kwargs["backend"] == "auto"
+        assert kwargs["nthreads"] == 1
         return SimpleNamespace(backend="rust")
 
     monkeypatch.setattr(pipeline, "scpc", fake_scpc)
     result = spur(
-        "y ~ x", df, coords_euclidean=("sx", "sy"), q=2, nrep=10, backend="auto"
+        "y ~ x",
+        df,
+        coords_euclidean=("sx", "sy"),
+        q=2,
+        nrep=10,
+        backend="auto",
+        nthreads=1,
     )
 
     assert result.fits.levels.model.model.formula == "y ~ x"
@@ -152,6 +163,63 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
         "i0resid": "tied_eigenspace",
         "i1resid": "tied_eigenspace",
     }
+
+
+def test_pipeline_preserves_literal_intercept_and_reports_legacy_scpc(monkeypatch):
+    rng = np.random.default_rng(95)
+    df = pd.DataFrame(rng.normal(size=(20, 3)), columns=["y", "Intercept", "sx"])
+    monkeypatch.setattr(
+        pipeline,
+        "_fallback_spur_test",
+        lambda test_type, *args, **kwargs: TestResult(
+            test_type, 1.0, 0.5, np.array([1.0, 2.0, 3.0]), 0.01
+        ),
+    )
+
+    def legacy_scpc(model, data, *, lon, lat, coords_euclidean, avc, uncond, cvs):
+        return SimpleNamespace(backend="fallback")
+
+    monkeypatch.setattr(pipeline, "scpc", legacy_scpc)
+    result = spur(
+        "y ~ 0 + Intercept",
+        df,
+        coords_euclidean=["sx"],
+        q=2,
+        nrep=10,
+        backend="fallback",
+    )
+    assert result.fits.transformed.model.model.exog_names == ["h_Intercept"]
+    assert result.fallback_reasons == {
+        "levels_scpc": "scpc_backend_api_unavailable",
+        "transformed_scpc": "scpc_backend_api_unavailable",
+    }
+
+
+@pytest.mark.parametrize("test_type", ["i0resid", "i1resid"])
+@pytest.mark.parametrize("wrapper", [False, True])
+def test_residual_formula_uses_callers_namespace(monkeypatch, test_type, wrapper):
+    df = pd.DataFrame(
+        {"y": [1.0, 3.0, 5.0], "x": [2.0, 3.0, 4.0], "sx": [0.0, 1.0, 2.0]}
+    )
+
+    def shift(a):
+        return a + 4
+
+    def check_design(kind, coords, latlong, y, *args, x_in):
+        assert kind == test_type
+        np.testing.assert_array_equal(y, [5.0, 7.0, 9.0])
+        np.testing.assert_array_equal(x_in, [[1.0, 6.0], [1.0, 7.0], [1.0, 8.0]])
+        return TestResult(test_type, 1.0, 0.5, np.array([1.0, 2.0, 3.0]), 0.01)
+
+    monkeypatch.setattr(pipeline, "_run_spur_test", check_design)
+    if wrapper:
+        pipeline.spurtest(
+            "shift(y) ~ shift(x)", df, coords_euclidean=["sx"], test=test_type
+        )
+    else:
+        getattr(pipeline, f"spurtest_{test_type}")(
+            "shift(y) ~ shift(x)", df, coords_euclidean=["sx"]
+        )
 
 
 @pytest.mark.parametrize(

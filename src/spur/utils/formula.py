@@ -1,9 +1,13 @@
 from __future__ import annotations
+from keyword import iskeyword
+
 import numpy as np
 import pandas as pd
 from patsy import PatsyError
-from patsy.desc import ModelDesc
+from patsy.desc import ModelDesc, Term
+from patsy.eval import EvalEnvironment
 from patsy.highlevel import dmatrices, dmatrix
+from patsy.user_util import LookupFactor
 
 
 def parse_single_var_formula(formula: str, data: pd.DataFrame, fn_name: str) -> dict:
@@ -34,7 +38,13 @@ def parse_single_var_formula(formula: str, data: pd.DataFrame, fn_name: str) -> 
     return {"var": var, "use_rows": np.ones(len(data), dtype=bool)}
 
 
-def parse_residual_formula(formula: str, data: pd.DataFrame, fn_name: str) -> dict:
+def parse_residual_formula(
+    formula: str,
+    data: pd.DataFrame,
+    fn_name: str,
+    *,
+    eval_env: EvalEnvironment | int = -1,
+) -> dict:
     """Parse a residual-test formula into `Y`, `X_in`, and the estimation sample.
 
     This keeps the public residual APIs formula-based while preserving the
@@ -45,7 +55,7 @@ def parse_residual_formula(formula: str, data: pd.DataFrame, fn_name: str) -> di
             f"`formula` for {fn_name} must be two-sided, e.g. `y ~ x1 + x2`."
         )
 
-    y, x = evaluate_formula(formula, data)
+    y, x = evaluate_formula(formula, data, eval_env=eval_env)
     if y.shape[1] != 1 or not getattr(y, "design_info").terms[0].factors:
         raise ValueError(f"`formula` for {fn_name} must have one numeric response.")
     return {
@@ -56,7 +66,11 @@ def parse_residual_formula(formula: str, data: pd.DataFrame, fn_name: str) -> di
 
 
 def evaluate_formula(
-    formula: str, data: pd.DataFrame, *, allow_no_response: bool = False
+    formula: str,
+    data: pd.DataFrame,
+    *,
+    eval_env: EvalEnvironment | int = -1,
+    allow_no_response: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Evaluate formula terms once and retain input row positions."""
     if not isinstance(formula, str) or "~" not in formula:
@@ -65,14 +79,18 @@ def evaluate_formula(
     # A fresh index preserves exact row positions with duplicate data labels.
     frame = data.reset_index(drop=True)
     try:
-        desc = ModelDesc.from_formula(formula)
+        desc = (
+            transform_formula_description(formula, frame.columns)
+            if allow_no_response
+            else (ModelDesc.from_formula(formula))
+        )
         if allow_no_response:
             desc.lhs_termlist = [term for term in desc.lhs_termlist if term.factors]
         if not desc.lhs_termlist and allow_no_response:
-            x = dmatrix(desc, frame, return_type="dataframe")
+            x = dmatrix(desc, frame, eval_env=eval_env, return_type="dataframe")
             y = pd.DataFrame(index=x.index)
         else:
-            y, x = dmatrices(desc, frame, return_type="dataframe")
+            y, x = dmatrices(desc, frame, eval_env=eval_env, return_type="dataframe")
     except PatsyError as error:
         if isinstance(error.__cause__, NameError):
             raise AssertionError(f"Variable not found in data: {error}") from error
@@ -83,6 +101,36 @@ def evaluate_formula(
     if not np.isfinite(y.to_numpy()).all() or not np.isfinite(x.to_numpy()).all():
         raise ValueError("The evaluated design and response must be finite.")
     return y, x
+
+
+def transform_formula_description(formula: str, columns: pd.Index) -> ModelDesc:
+    """Retain the original transform shorthand for literal column names."""
+    lhs, rhs = (part.strip() for part in formula.split("~", 1))
+    left = [] if lhs in ("", "1") else [lhs]
+    right = [] if rhs in ("", "1") else [part.strip() for part in rhs.split("+")]
+    names = left + right
+    if (
+        names
+        and all(name in columns for name in names)
+        and any(not name.isidentifier() or iskeyword(name) for name in names)
+    ):
+        return ModelDesc(
+            [Term([LookupFactor(name)]) for name in left],
+            [Term([]), *(Term([LookupFactor(name)]) for name in right)],
+        )
+    return ModelDesc.from_formula(formula if rhs else f"{lhs} ~ 1")
+
+
+def intercept_columns(design_info) -> slice | None:
+    """Locate the Patsy intercept term without interpreting a column name."""
+    return next(
+        (
+            columns
+            for term, columns in design_info.term_slices.items()
+            if not term.factors
+        ),
+        None,
+    )
 
 
 def parse_transform_formula(formula: str, data: pd.DataFrame) -> list[str]:

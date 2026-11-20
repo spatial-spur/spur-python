@@ -81,6 +81,41 @@ def test_spurtransform_adds_columns_without_mutating_inputs(
     npt.assert_array_equal(sample_df["y"].to_numpy(), y_before.to_numpy())
 
 
+def test_spurtransform_supports_literal_names_and_empty_right_side():
+    df = pd.DataFrame({"outcome level": [2.0, 5.0, 9.0], "site": [0.0, 1.0, 5.0]})
+    result = spurtransform(
+        "outcome level ~ ",
+        df,
+        transformation="nn",
+        coords_euclidean=["site"],
+        backend="fallback",
+    )
+    npt.assert_array_equal(result["h_outcome level"], [-3.0, 3.0, 4.0])
+
+
+def test_spurtransform_preserves_literal_intercept_and_captures_helpers():
+    df = pd.DataFrame(
+        {"y": [2.0, 5.0, 9.0], "Intercept": [1.0, 3.0, 4.0], "site": [0.0, 1.0, 5.0]}
+    )
+
+    def square(a):
+        return a**2
+
+    result = spurtransform(
+        "square(y) ~ 0 + Intercept",
+        df,
+        transformation="nn",
+        coords_euclidean=["site"],
+        backend="fallback",
+    )
+    npt.assert_array_equal(result["h_square(y)"], [-21.0, 21.0, 56.0])
+    npt.assert_array_equal(result["h_Intercept"], [-2.0, 2.0, 1.0])
+    with pytest.raises(AssertionError, match="Variable not found"):
+        spurtransform(
+            "y ~ allow_no_response", df, coords_euclidean=["site"], backend="fallback"
+        )
+
+
 def test_spurtransform_rejects_missing_coordinates() -> None:
     df = pd.DataFrame(
         {
