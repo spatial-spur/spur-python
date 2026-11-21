@@ -5,7 +5,18 @@ import pandas as pd
 import pytest
 
 from spur import spurtransform
+from spur.core import load_rust_backend
 from spur.utils.matrix import cluster_matrix
+
+TRANSFORM_BACKENDS = (
+    "fallback",
+    pytest.param(
+        "rust",
+        marks=pytest.mark.skipif(
+            load_rust_backend() is None, reason="Rust backend is unavailable"
+        ),
+    ),
+)
 
 
 def test_spurtransform_validation_errors_are_value_errors(capsys) -> None:
@@ -45,12 +56,14 @@ def test_spurtransform_validation_errors_are_value_errors(capsys) -> None:
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)
 @pytest.mark.parametrize("bad_radius", [0.0, -5.0, np.nan, np.inf, True])
 def test_spurtransform_iso_rejects_invalid_radius(
     backend: str, bad_radius: float | bool
 ) -> None:
-    df = pd.DataFrame({"y": [1.0, 2.0, 3.0], "sx": [0.0, 1.0, 2.0], "sy": [0.0, 0.0, 1.0]})
+    df = pd.DataFrame(
+        {"y": [1.0, 2.0, 3.0], "sx": [0.0, 1.0, 2.0], "sy": [0.0, 0.0, 1.0]}
+    )
     with pytest.raises(ValueError, match="radius"):
         spurtransform(
             "y ~ 1",
@@ -62,7 +75,7 @@ def test_spurtransform_iso_rejects_invalid_radius(
         )
 
 
-@pytest.mark.parametrize("backend", ["fallback", "rust"])
+@pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)
 @pytest.mark.parametrize("transformation", ["nn", "iso", "lbmgls"])
 def test_spurtransform_spatial_rejects_single_observation(
     backend: str, transformation: str
