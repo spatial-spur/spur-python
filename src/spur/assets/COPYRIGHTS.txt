@@ -1,0 +1,15 @@
+Commuting-zone example data
+===========================
+
+Chetty, Hendren, Kline and Saez (2014), Where Is the Land of Opportunity?
+The Geography of Intergenerational Mobility in the United States.
+https://doi.org/10.1093/qje/qju022
+https://doi.org/10.7910/DVN/NALG3E
+
+The package converts the commuting-zone workbook from the replication
+materials of Mueller and Watson (2024), Spatial Unit Roots and Spurious
+Regression, to CSV.
+https://doi.org/10.5281/zenodo.11199509
+
+The original data and replication deposits carry CC BY 4.0.
+https://creativecommons.org/licenses/by/4.0/

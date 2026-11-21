@@ -9,7 +9,7 @@ authors = [
     { name = "P. David Boll" },
     { name = "Hans-Joachim Voth" },
 ]
-license = "MIT"
+license = "MIT AND CC-BY-4.0"
 keywords = [
     "spatial econometrics",
     "econometrics",
@@ -45,7 +45,7 @@ dev = [
 Paper = "https://journals.sagepub.com/doi/10.1177/1536867X261449932"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.package-dir]
@@ -55,4 +55,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-spur = ["assets/*.csv"]
+spur = ["assets/*.csv", "assets/COPYRIGHTS.txt"]
