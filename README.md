@@ -123,7 +123,11 @@ parallelism after native threads have been used, start workers with
 the same complete-case sample. It applies the LBM-GLS transform to the evaluated
 outcome and each non-intercept design column. The result reports the actual
 backend of each calculation in `stage_backends` and explains automatic changes
-in `fallback_reasons`. Use `y ~ C(region)` with an intercept. A full set of
+in `fallback_reasons`. With `backend="auto"`, a native eigenspace tie reruns
+all four diagnostics and the transformation together in Python using the same
+simulation draws. Each SCPC fit selects its own backend.
+
+Use `y ~ C(region)` with an intercept. A full set of
 category indicators in `y ~ 0 + C(region)` spans a constant, which LBM-GLS
 removes and leaves the transformed coefficients unidentified.
 
@@ -133,9 +137,7 @@ the prefix and evaluated column names. Rows excluded by the formula have missing
 values in those columns. `spurhalflife()` also reports `fallback_reason` when
 automatic dispatch uses the Python implementation.
 
-The Rust backend in this development branch requires SPUR API 3 and SCPC API 6
-(`spatial-spur-rust` 0.2.3). To test it before the compatible wheel is
-published, install from the matching shared-core checkout. The full pipeline
+The Rust backend in this development branch requires SPUR API 3 and SCPC API 7. Install the native adapter from the matching shared-core checkout. The full pipeline
 also needs the matching development checkout of SCPC for native execution.
 
 ```bash

@@ -188,7 +188,7 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
     import scpc.core as scpc_core
     import spur.core as spur_core
 
-    stale = SimpleNamespace(API_VERSION=6, SPUR_API_VERSION=2)
+    stale = SimpleNamespace(API_VERSION=7, SPUR_API_VERSION=2)
     original_import = importlib.import_module
     monkeypatch.setattr(
         importlib,
@@ -200,7 +200,7 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
         ),
     )
     assert spur_core.load_rust_backend() is None
-    if getattr(scpc_core, "RUST_API_VERSION", None) == 6:
+    if getattr(scpc_core, "RUST_API_VERSION", None) == 7:
         assert scpc_core.load_rust_backend() is stale
 
     rng = np.random.default_rng(788)
@@ -212,7 +212,7 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
     result = spur.spurtest_i0resid("y ~ x", d, q=10, backend="auto", **opts)
     assert result.backend == "fallback"
     assert result.fallback_reason == "missing_or_incompatible_native_extension"
-    with pytest.raises(RuntimeError, match=r"spatial-spur-rust >= 0\.2\.3"):
+    with pytest.raises(RuntimeError, match="SPUR API 3"):
         spur.spurtest_i0resid("y ~ x", d, q=10, backend="rust", **opts)
     with pytest.raises(ValueError, match="residual dimension"):
         spur.spurtest_i0resid("y ~ x", d, q=11, backend="auto", **opts)

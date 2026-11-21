@@ -4,7 +4,7 @@ from keyword import iskeyword
 import numpy as np
 import pandas as pd
 from patsy import PatsyError
-from patsy.desc import ModelDesc, Term
+from patsy.desc import INTERCEPT, ModelDesc, Term
 from patsy.eval import EvalEnvironment
 from patsy.highlevel import dmatrices, dmatrix
 from patsy.user_util import LookupFactor
@@ -91,7 +91,7 @@ def evaluate_formula(
             y = pd.DataFrame(index=x.index)
         else:
             y, x = dmatrices(desc, frame, eval_env=eval_env, return_type="dataframe")
-    except PatsyError as error:
+    except (PatsyError, SyntaxError) as error:
         if isinstance(error.__cause__, NameError):
             raise AssertionError(f"Variable not found in data: {error}") from error
         raise ValueError(f"Invalid formula: {error}") from error
@@ -121,16 +121,17 @@ def transform_formula_description(formula: str, columns: pd.Index) -> ModelDesc:
     return ModelDesc.from_formula(formula if rhs else f"{lhs} ~ 1")
 
 
-def intercept_columns(design_info) -> slice | None:
-    """Locate the Patsy intercept term without interpreting a column name."""
-    return next(
-        (
-            columns
-            for term, columns in design_info.term_slices.items()
-            if not term.factors
-        ),
-        None,
-    )
+def intercept_columns(design_info_or_data) -> slice | None:
+    """Locate the intercept term in a Patsy DesignInfo or Formulaic ModelSpec."""
+    spec = design_info_or_data
+    if not hasattr(spec, "term_slices"):
+        spec = getattr(design_info_or_data, "model_spec", None)
+        if spec is None:
+            spec = design_info_or_data.design_info
+    slices = spec.term_slices
+    # Formulaic terms support their formula spelling as a lookup key.
+    # Both lookups refer to terms, so a data column named Intercept stays a regressor.
+    return slices.get(INTERCEPT) or slices.get("1")
 
 
 def parse_transform_formula(formula: str, data: pd.DataFrame) -> list[str]:

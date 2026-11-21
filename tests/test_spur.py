@@ -15,6 +15,49 @@ from spur import (
 )
 
 
+@pytest.mark.parametrize("engine", ["patsy", "formulaic"])
+def test_spur_uses_intercept_from_real_formula_engine(monkeypatch, engine):
+    import statsmodels.formula
+
+    if engine == "formulaic":
+        pytest.importorskip("formulaic")
+    options = getattr(statsmodels.formula, "options", None)
+    if options is not None:
+        monkeypatch.setattr(options, "formula_engine", engine)
+    elif engine != "patsy":
+        pytest.skip("statsmodels 0.15 or later is required for Formulaic")
+    from tests.config import BENCH_200
+
+    df = pd.read_csv(BENCH_200).iloc[:120]
+    result = spur(
+        "y ~ x1",
+        df,
+        lon="s_1",
+        lat="s_2",
+        q=8,
+        nrep=400,
+        seed=42,
+        backend="fallback",
+    )
+    assert result.fits.levels.model.model.k_constant == 1
+    assert result.fits.transformed.model.model.exog_names == ["Intercept", "h_x1"]
+
+
+def test_real_model_specs_distinguish_intercept_from_named_regressor():
+    from patsy.highlevel import dmatrix
+    from spur.utils.formula import evaluate_formula, intercept_columns
+
+    df = pd.DataFrame({"y": [1, 2, 4], "Intercept": [2, 3, 8], "x": [0, 1, 2]})
+    with pytest.raises(ValueError, match="Invalid formula"):
+        evaluate_formula("y ~ (", df, allow_no_response=True)
+    formulaic = pytest.importorskip("formulaic")
+    for rhs, expected in [("x", slice(0, 1)), ("0 + Intercept", None)]:
+        patsy_spec = dmatrix(rhs, df).design_info
+        formulaic_spec = formulaic.model_matrix(rhs, df).model_spec
+        assert intercept_columns(patsy_spec) == expected
+        assert intercept_columns(formulaic_spec) == expected
+
+
 def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
     rng = np.random.default_rng(441)
     n = 30
@@ -151,18 +194,18 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
     assert result.backend == "fallback"
     assert result.tied
     assert result.stage_backends == {
-        "i0": "rust",
-        "i1": "rust",
+        "i0": "fallback",
+        "i1": "fallback",
         "i0resid": "fallback",
         "i1resid": "fallback",
-        "transform": "rust",
+        "transform": "fallback",
         "levels_scpc": "rust",
         "transformed_scpc": "rust",
     }
-    assert result.fallback_reasons == {
-        "i0resid": "tied_eigenspace",
-        "i1resid": "tied_eigenspace",
-    }
+    assert result.fallback_reasons == dict.fromkeys(
+        ("i0", "i1", "i0resid", "i1resid", "transform"), "tied_eigenspace"
+    )
+    assert not result.tests.i0.tied and result.tests.i0resid.tied
 
 
 def test_pipeline_preserves_literal_intercept_and_reports_legacy_scpc(monkeypatch):

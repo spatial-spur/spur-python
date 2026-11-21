@@ -57,7 +57,7 @@ from .utils.matrix import (
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
-RUST_API_VERSION = 6
+RUST_API_VERSION = 7
 SPUR_RUST_API_VERSION = 3
 EARTH_RADIUS_M = 6_371_000.0
 EARTH_CIRCUMFERENCE_M = 2.0 * math.pi * EARTH_RADIUS_M
@@ -133,7 +133,7 @@ def _require_rust_if_requested(resolved_backend: str) -> Any | None:
     rust_mod = load_rust_backend()
     if rust_mod is None and resolved_backend == "rust":
         raise RuntimeError(
-            "Rust backend requested, but `spatial_spur_rust` with compatible SPUR support is unavailable. Install spatial-spur-rust >= 0.2.3."
+            "Rust backend requested, but a compatible `spatial_spur_rust` is unavailable. Build the matching development adapter with SPUR API 3 and SCPC API 7."
         )
     return rust_mod
 
@@ -243,19 +243,15 @@ def _fallback_reason(backend: str, tied: bool = False) -> str | None:
     return "missing_or_incompatible_native_extension" if backend == "auto" else None
 
 
-def _validate_test_dimensions(
-    q: int, nrep: int, n: int, design_basis: np.ndarray | None = None
-) -> None:
+def _validate_test_dimensions(q: int, nrep: int, n: int, n_regressors: int = 0) -> None:
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
     if q < 2:
         raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
     if nrep < 1:
         raise ValueError(f"nrep={nrep} must be >= 1.")
-    if design_basis is not None and q > n - design_basis.shape[1]:
-        raise ValueError(
-            f"q={q} exceeds the residual dimension {n - design_basis.shape[1]}."
-        )
+    if q > n - n_regressors:
+        raise ValueError(f"q={q} exceeds the residual dimension {n - n_regressors}.")
 
 
 def _run_spur_test(
@@ -271,8 +267,7 @@ def _run_spur_test(
     *,
     x_in: np.ndarray | None = None,
 ) -> TestResult:
-    design_basis = None if x_in is None else orthonormal_design_basis(x_in)
-    _validate_test_dimensions(q, nrep, len(y), design_basis)
+    _validate_test_dimensions(q, nrep, len(y), 0 if x_in is None else x_in.shape[1])
     emat = _draw_emat(seed, q, nrep)
     rust_res, tied = _try_rust_spur_test(
         test_type,
@@ -288,6 +283,7 @@ def _run_spur_test(
     )
     if rust_res is not None:
         return rust_res
+    design_basis = None if x_in is None else orthonormal_design_basis(x_in)
     return _fallback_spur_test(
         test_type,
         y,
@@ -1336,10 +1332,13 @@ def spur(
     if not np.isfinite(y).all() or not np.isfinite(x).all():
         raise ValueError("The evaluated regression design and response must be finite.")
     design_names = fitted.exog_names
-    intercept_slice = intercept_columns(fitted.data.design_info)
+    intercept_slice = intercept_columns(fitted.data)
     intercept = intercept_slice is not None
-    design_basis = orthonormal_design_basis(x)
+    design_basis = None
+    if not intercept or rust_mod is None:
+        design_basis = orthonormal_design_basis(x)
     if not intercept:
+        assert design_basis is not None
         constant = np.ones(len(sample))
         if np.linalg.norm(constant - design_basis @ (design_basis.T @ constant)) <= (
             1e-10 * math.sqrt(len(sample))
@@ -1348,8 +1347,7 @@ def spur(
                 "The intercept-free design spans a constant, so the transformed "
                 "regression would be rank-deficient. Use an explicit intercept."
             )
-    _validate_test_dimensions(q, nrep, len(sample), design_basis)
-    levels_model = fitted.fit()
+    _validate_test_dimensions(q, nrep, len(sample), x.shape[1])
 
     coord_info = resolve_spur_coords(
         data=sample,
@@ -1382,20 +1380,26 @@ def spur(
             nthreads=nthreads,
         )
 
-    distmat = None
+    any_tied = native is not None and any(native[k]["tied"] for k in test_types)
+    use_native = native is not None and (backend == "rust" or not any_tied)
+    distmat = None if use_native else normalized_distmat(coords, latlon=latlong)
+    if not use_native and design_basis is None:
+        design_basis = orthonormal_design_basis(x)
+    levels_model = fitted.fit()
+    fallback_reason = _fallback_reason(backend, any_tied)
     stage_backends: dict[str, str] = {}
     fallback_reasons: dict[str, str] = {}
     tests: dict[str, TestResult] = {}
     for test_type in test_types:
         stage = None if native is None else native[test_type]
         tied = stage is not None and bool(stage["tied"])
-        if stage is not None and (backend == "rust" or not tied):
+        if use_native:
+            assert stage is not None
             result = _test_result_from_rust(
                 test_type, stage, is_i0=test_type.startswith("i0")
             )
         else:
-            if distmat is None:
-                distmat = normalized_distmat(coords, latlon=latlong)
+            assert distmat is not None
             result = _fallback_spur_test(
                 test_type,
                 y,
@@ -1403,22 +1407,22 @@ def spur(
                 emat,
                 design_basis if test_type.endswith("resid") else None,
                 tied=tied,
-                fallback_reason=_fallback_reason(backend, tied),
+                fallback_reason=fallback_reason,
             )
         tests[test_type] = result
         stage_backends[test_type] = result.backend
         if result.fallback_reason is not None:
             fallback_reasons[test_type] = result.fallback_reason
 
-    if native is not None:
+    if use_native:
+        assert native is not None
         transformed = np.asarray(native["transformed_vars"], dtype=float)
         stage_backends["transform"] = "rust"
     else:
         transformed = lbmgls_matrix(coords, latlon=latlong) @ transform_input
         stage_backends["transform"] = "fallback"
-        reason = _fallback_reason(backend)
-        if reason is not None:
-            fallback_reasons["transform"] = reason
+        if fallback_reason is not None:
+            fallback_reasons["transform"] = fallback_reason
 
     transformed_data = sample.copy()
     names = [fitted.endog_names, *(design_names[i] for i in transform_idx)]
