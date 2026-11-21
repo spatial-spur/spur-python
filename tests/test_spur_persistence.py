@@ -118,3 +118,60 @@ def test_spur_persistence_excludes_exact_nominal_threshold(
     grid = np.linspace(0.001, 1, 100)
     assert lower == grid[first_accepted]
     assert upper == grid[1]
+
+
+def test_spur_persistence_high_q_avoids_overflow(monkeypatch) -> None:
+    import spur
+    import spur.core as spur_core
+
+    rng = np.random.default_rng(2026)
+    n, q, nrep = 70, 40, 100
+    s1 = rng.uniform(0.0, 1.0, size=n)
+    s2 = rng.uniform(0.0, 1.0, size=n)
+    df = pd.DataFrame(
+        {
+            "y": np.sin(3.0 * s1)
+            + 0.4 * np.cos(2.0 * s2)
+            + 0.1 * rng.standard_normal(n),
+            "s1": s1,
+            "s2": s2,
+        }
+    )
+    emat = rng.standard_normal((q, nrep))
+
+    monkeypatch.setattr(spur_core, "_draw_emat", lambda _s, _q, _n, e=emat: e)
+    fb = spur.spurhalflife(
+        "y",
+        df,
+        coords_euclidean=("s1", "s2"),
+        q=q,
+        nrep=nrep,
+        level=95,
+        normdist=False,
+        backend="fallback",
+    )
+    assert np.isfinite(fb.ci_lower)
+    assert 0.0 < fb.ci_lower <= fb.ci_upper
+    assert fb.backend == "fallback"
+
+    if spur_core.load_rust_backend() is None:
+        return
+    ru = spur.spurhalflife(
+        "y",
+        df,
+        coords_euclidean=("s1", "s2"),
+        q=q,
+        nrep=nrep,
+        level=95,
+        normdist=False,
+        backend="rust",
+        nthreads=1,
+    )
+    assert ru.backend == "rust"
+    assert ru.ci_lower == pytest.approx(fb.ci_lower, rel=1e-12, abs=1e-12)
+    if np.isinf(fb.ci_upper):
+        assert np.isinf(ru.ci_upper)
+    else:
+        assert ru.ci_upper == pytest.approx(fb.ci_upper, rel=1e-12, abs=1e-12)
+    assert ru.pv_mat is not None
+    assert len(ru.pv_mat) == 131 and np.all(np.isfinite(ru.pv_mat))

@@ -110,7 +110,7 @@ def test_spurtransform_preserves_literal_intercept_and_captures_helpers():
     )
     npt.assert_array_equal(result["h_square(y)"], [-21.0, 21.0, 56.0])
     npt.assert_array_equal(result["h_Intercept"], [-2.0, 2.0, 1.0])
-    with pytest.raises(AssertionError, match="Variable not found"):
+    with pytest.raises(ValueError, match="Variable not found"):
         spurtransform(
             "y ~ allow_no_response", df, coords_euclidean=["site"], backend="fallback"
         )
@@ -125,12 +125,12 @@ def test_spurtransform_rejects_missing_coordinates() -> None:
         }
     )
 
-    with pytest.raises(AssertionError, match="finite"):
+    with pytest.raises(ValueError, match="finite"):
         spurtransform("y ~ 1", df, lon="lon", lat="lat", transformation="nn")
 
 
 def test_spurtransform_rejects_missing_variable(sample_df: pd.DataFrame) -> None:
-    with pytest.raises(AssertionError, match="not found"):
+    with pytest.raises(ValueError, match="not found"):
         spurtransform(
             "missing ~ 1", sample_df, lon="lon", lat="lat", transformation="nn"
         )
@@ -204,7 +204,7 @@ def test_spurtransform_rejects_nullable_string_clusters_with_missing() -> None:
         }
     )
 
-    with pytest.raises(AssertionError, match="missing"):
+    with pytest.raises(ValueError, match="missing"):
         spurtransform(
             "y ~ 1",
             df,

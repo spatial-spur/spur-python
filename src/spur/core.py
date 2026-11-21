@@ -962,9 +962,9 @@ def spurtransform(
 
     Raises:
         ValueError: If the formula is invalid, variables are missing, coordinates
-            are invalid, or the transformation name is unknown.
-        AssertionError: If a required `radius` or `clustvar` is missing, or if the
-            cluster column contains missing values.
+            or radius are invalid, a required `radius` or `clustvar` is missing,
+            the cluster column contains missing values, a spatial transformation
+            has fewer than 2 observations, or the transformation name is unknown.
 
     Example:
         >>> from spur import load_chetty_data, standardize, spurtransform
@@ -1012,19 +1012,20 @@ def spurtransform(
     coords_raw: np.ndarray | None = None
     latlon = False
     if transformation == "cluster":
-        assert clustvar is not None, (
-            "clustvar must be specified for transformation='cluster'"
-        )
-        assert clustvar in sample.columns, (
-            f"Cluster variable '{clustvar}' not found in DataFrame"
-        )
-        assert not sample[clustvar].isna().any(), (
-            f"Cluster column '{clustvar}' contains missing values."
-        )
+        if clustvar is None:
+            raise ValueError("clustvar must be specified for transformation='cluster'")
+        if clustvar not in sample.columns:
+            raise ValueError(f"Cluster variable '{clustvar}' not found in DataFrame")
+        if sample[clustvar].isna().any():
+            raise ValueError(f"Cluster column '{clustvar}' contains missing values.")
         cluster = sample[clustvar].to_numpy()
         codes, _ = pd.factorize(cluster, sort=False)
         cluster_codes = np.ascontiguousarray(codes, dtype=np.int64)
     else:
+        if n < 2:
+            raise ValueError(
+                f"Spatial transformation '{transformation}' requires at least 2 observations."
+            )
         coord_info = resolve_spur_coords(
             data=data,
             use_rows=use_rows,
@@ -1035,9 +1036,17 @@ def spurtransform(
         coords_raw = coord_info["coords"]
         latlon = coord_info["latlong"]
         if transformation == "iso":
-            assert radius is not None, (
-                "radius must be specified for transformation='iso'"
-            )
+            if radius is None:
+                raise ValueError("radius must be specified for transformation='iso'")
+            if isinstance(radius, bool):
+                raise ValueError("radius must be a finite positive number.")
+            try:
+                radius_val = float(radius)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("radius must be a finite positive number.") from exc
+            if not np.isfinite(radius_val) or radius_val <= 0.0:
+                raise ValueError("radius must be finite and strictly positive.")
+            radius = radius_val
 
     if rust_mod is not None and (n >= 2 or resolved_backend == "rust"):
         radius_arg = None
@@ -1062,14 +1071,17 @@ def spurtransform(
         )
         transformed = np.asarray(rust_res["transformed"], dtype=float)
     elif transformation == "cluster":
-        assert cluster is not None
+        if cluster is None:
+            raise ValueError("clustvar must be specified for transformation='cluster'")
         transformed = cluster_matrix(cluster) @ values
     else:
-        assert coords_raw is not None
+        if coords_raw is None:
+            raise ValueError("Coordinates must be resolved for spatial transformation.")
         if transformation == "nn":
             M = nn_matrix(coords_raw, latlon=latlon)
         elif transformation == "iso":
-            assert radius is not None
+            if radius is None:
+                raise ValueError("radius must be specified for transformation='iso'")
             M = iso_matrix(coords_raw, radius, latlon=latlon)
         else:
             M = lbmgls_matrix(coords_raw, latlon=latlon)

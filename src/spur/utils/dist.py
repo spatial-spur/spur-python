@@ -26,26 +26,26 @@ def resolve_spur_coords(
         raise ValueError("Specify coordinates via `lon`/`lat` or `coords_euclidean`.")
 
     if use_geodesic:
-        assert lon is not None and lat is not None, (
-            "Both `lon` and `lat` must be specified for geodesic coordinates."
-        )
+        if lon is None or lat is None:
+            raise ValueError(
+                "Both `lon` and `lat` must be specified for geodesic coordinates."
+            )
         missing = [name for name in (lon, lat) if name not in data.columns]
-        assert not missing, (
-            f"Coordinate variables not found in data: {', '.join(missing)}"
-        )
+        if missing:
+            raise ValueError(
+                f"Coordinate variables not found in data: {', '.join(missing)}"
+            )
 
         coords_lon_lat = data.loc[use_rows, [lon, lat]]
-        assert all(
-            np.issubdtype(dtype, np.number) for dtype in coords_lon_lat.dtypes
-        ), "`lon` and `lat` must reference numeric columns."
+        if not all(np.issubdtype(dtype, np.number) for dtype in coords_lon_lat.dtypes):
+            raise ValueError("`lon` and `lat` must reference numeric columns.")
         arr = coords_lon_lat.to_numpy(dtype=float)
-        assert np.isfinite(arr).all(), "Geodesic coordinates must be finite."
-        assert ((coords_lon_lat[lon] >= -180) & (coords_lon_lat[lon] <= 180)).all(), (
-            "Longitude values must be in [-180, 180]."
-        )
-        assert ((coords_lon_lat[lat] >= -90) & (coords_lon_lat[lat] <= 90)).all(), (
-            "Latitude values must be in [-90, 90]."
-        )
+        if not np.isfinite(arr).all():
+            raise ValueError("Geodesic coordinates must be finite.")
+        if not ((coords_lon_lat[lon] >= -180) & (coords_lon_lat[lon] <= 180)).all():
+            raise ValueError("Longitude values must be in [-180, 180].")
+        if not ((coords_lon_lat[lat] >= -90) & (coords_lon_lat[lat] <= 90)).all():
+            raise ValueError("Latitude values must be in [-90, 90].")
         return {
             "coords": data.loc[use_rows, [lat, lon]].to_numpy(dtype=float),
             "latlong": True,
@@ -61,14 +61,17 @@ def resolve_spur_coords(
         )
 
     missing = [name for name in coords_euclidean if name not in data.columns]
-    assert not missing, f"Coordinate variables not found in data: {', '.join(missing)}"
+    if missing:
+        raise ValueError(
+            f"Coordinate variables not found in data: {', '.join(missing)}"
+        )
 
     coords = data.loc[use_rows, list(coords_euclidean)]
-    assert all(np.issubdtype(dtype, np.number) for dtype in coords.dtypes), (
-        "`coords_euclidean` columns must be numeric."
-    )
+    if not all(np.issubdtype(dtype, np.number) for dtype in coords.dtypes):
+        raise ValueError("`coords_euclidean` columns must be numeric.")
     arr = coords.to_numpy(dtype=float)
-    assert np.isfinite(arr).all(), "Euclidean coordinates must be finite."
+    if not np.isfinite(arr).all():
+        raise ValueError("Euclidean coordinates must be finite.")
 
     return {"coords": arr, "latlong": False}
 

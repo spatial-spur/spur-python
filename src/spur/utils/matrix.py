@@ -392,9 +392,6 @@ def cluster_matrix(cluster: np.ndarray) -> np.ndarray:
     clust_mat = clust_mat / clust_mat.sum(axis=1, keepdims=True)
     M = np.eye(n) - clust_mat
 
-    n_clusters = len(np.unique(cluster))
-    print(f"Number of observations: {n}, number of clusters: {n_clusters}")
-
     return M
 
 

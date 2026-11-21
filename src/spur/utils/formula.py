@@ -34,7 +34,8 @@ def parse_single_var_formula(formula: str, data: pd.DataFrame, fn_name: str) -> 
             raise ValueError(f"For {fn_name} use `y` or `y ~ 1`.")
         var = lhs
 
-    assert var in data.columns, f"Variable '{var}' not found in data."
+    if var not in data.columns:
+        raise ValueError(f"Variable '{var}' not found in data.")
     return {"var": var, "use_rows": np.ones(len(data), dtype=bool)}
 
 
@@ -93,7 +94,7 @@ def evaluate_formula(
             y, x = dmatrices(desc, frame, eval_env=eval_env, return_type="dataframe")
     except (PatsyError, SyntaxError) as error:
         if isinstance(error.__cause__, NameError):
-            raise AssertionError(f"Variable not found in data: {error}") from error
+            raise ValueError(f"Variable not found in data: {error}") from error
         raise ValueError(f"Invalid formula: {error}") from error
 
     if len(x) == 0:
@@ -155,9 +156,11 @@ def parse_transform_formula(formula: str, data: pd.DataFrame) -> list[str]:
         rhs_terms = []
 
     vars = list(dict.fromkeys(vars))
-    assert vars, "No variables found in `formula`."
+    if not vars:
+        raise ValueError("No variables found in `formula`.")
     missing = [name for name in vars if name not in data.columns]
-    assert not missing, f"Variables not found in data: {', '.join(missing)}"
+    if missing:
+        raise ValueError(f"Variables not found in data: {', '.join(missing)}")
 
     return vars
 

@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.special import gamma as gamma_func
+from scipy.special import logsumexp
 
 from .dist import get_cbar
 from .matrix import (
@@ -259,8 +259,7 @@ def _half_life_exceedance_counts(
     informative = False
     ch_om_list = []
     ch_omi_list = []
-    const_den_list = np.zeros(n_c_ho)
-    const_factor = 0.5 * gamma_func(q / 2) / (np.pi ** (q / 2))
+    log_det_list = np.zeros(n_c_ho)
 
     for i in range(n_c_ho):
         c = c_grid_ho[i]
@@ -273,11 +272,12 @@ def _half_life_exceedance_counts(
             informative = True
         ch_om_list.append(cholesky_upper(om))
         omi = np.linalg.inv(om)
-        ch_omi_list.append(cholesky_upper(omi))
-        const_den_list[i] = np.sqrt(np.linalg.det(omi)) * const_factor
+        ch_omi = cholesky_upper(omi)
+        ch_omi_list.append(ch_omi)
+        log_det_list[i] = np.sum(np.log(np.diag(ch_omi)))
 
     ch_omi_ha_list = []
-    const_den_ha_list = np.zeros(n_c_ha)
+    log_det_ha_list = np.zeros(n_c_ha)
 
     for i in range(n_c_ha):
         c = c_grid_ha[i]
@@ -287,8 +287,9 @@ def _half_life_exceedance_counts(
         if np.max(np.abs(shape - reference_shape)) > 1e-12:
             informative = True
         omi = np.linalg.inv(om)
-        ch_omi_ha_list.append(cholesky_upper(omi))
-        const_den_ha_list[i] = np.sqrt(np.linalg.det(omi)) * const_factor
+        ch_omi = cholesky_upper(omi)
+        ch_omi_ha_list.append(ch_omi)
+        log_det_ha_list[i] = np.sum(np.log(np.diag(ch_omi)))
 
     if not informative:
         raise ValueError(
@@ -296,37 +297,40 @@ def _half_life_exceedance_counts(
         )
     X = validate_and_project_y(Y, R)
     counts = np.empty(n_c_ho, dtype=np.intp)
+    half_q = 0.5 * q
+    log_n_c_ha = np.log(n_c_ha)
 
     for i in range(n_c_ho):
         ch_null = ch_om_list[i]
         e = ch_null.T @ emat
 
         ch_omi = ch_omi_list[i]
-        const_den = const_den_list[i]
+        log_det = log_det_list[i]
         xc = ch_omi @ e
-        den_ho = const_den * (np.sum(xc**2, axis=0) ** (-q / 2))
-
         Xc = ch_omi @ X
-        den_ho_X = const_den * (np.sum(Xc**2) ** (-q / 2))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_den_ho = log_det - half_q * np.log(np.sum(xc**2, axis=0))
+            log_den_ho_X = log_det - half_q * np.log(np.sum(Xc**2))
 
-        den_ha_mat = np.zeros((emat.shape[1], n_c_ha))
-        den_ha_mat_X = np.zeros(n_c_ha)
+        log_den_ha_mat = np.empty((emat.shape[1], n_c_ha))
+        log_den_ha_mat_X = np.empty(n_c_ha)
 
         for j in range(n_c_ha):
             ch_omi_j = ch_omi_ha_list[j]
-            const_den_j = const_den_ha_list[j]
+            log_det_j = log_det_ha_list[j]
             xc_j = ch_omi_j @ e
-            den_ha_mat[:, j] = const_den_j * (np.sum(xc_j**2, axis=0) ** (-q / 2))
             Xc_j = ch_omi_j @ X
-            den_ha_mat_X[j] = const_den_j * (np.sum(Xc_j**2) ** (-q / 2))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                log_den_ha_mat[:, j] = log_det_j - half_q * np.log(
+                    np.sum(xc_j**2, axis=0)
+                )
+                log_den_ha_mat_X[j] = log_det_j - half_q * np.log(np.sum(Xc_j**2))
 
-        den_ha_avg = den_ha_mat.mean(axis=1)
-        lr = den_ha_avg / den_ho
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_lr = logsumexp(log_den_ha_mat, axis=1) - log_n_c_ha - log_den_ho
+            log_lr_X = logsumexp(log_den_ha_mat_X) - log_n_c_ha - log_den_ho_X
 
-        den_ha_avg_X = den_ha_mat_X.mean()
-        lr_X = den_ha_avg_X / den_ho_X
-
-        counts[i] = np.count_nonzero(lr > lr_X)
+        counts[i] = np.count_nonzero(log_lr > log_lr_X)
 
     return counts
 
