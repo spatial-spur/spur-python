@@ -235,9 +235,8 @@ def nn_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     """
     Compute nearest-neighbor transformation matrix.
 
-    For each observation, identifies its nearest neighbor and creates a
-    row-normalized weight matrix. The transformation matrix is I - W,
-    which effectively differences each observation from its nearest neighbor.
+    Difference each observation from the average at the nearest distinct
+    location or locations. Observations at zero distance are excluded.
 
     Parameters
     ----------
@@ -255,8 +254,12 @@ def nn_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     n = coords.shape[0]
     distmat = get_distance_matrix(coords, latlon=latlon)
 
-    np.fill_diagonal(distmat, np.inf)
+    distmat[distmat == 0.0] = np.inf
     min_dist = np.min(distmat, axis=1, keepdims=True)
+    if not np.isfinite(min_dist).all():
+        raise ValueError(
+            "Nearest-neighbor transform requires at least two distinct locations."
+        )
     NN = (distmat == min_dist).astype(float)
     row_sums = NN.sum(axis=1, keepdims=True)
     NN = NN / row_sums
@@ -299,7 +302,7 @@ def iso_matrix(coords: np.ndarray, radius: float, latlon: bool = True) -> np.nda
     n = coords.shape[0]
     distmat = get_distance_matrix(coords, latlon=latlon)
 
-    neighbors = (distmat < radius) & (distmat > 0)
+    neighbors = (distmat <= radius) & (distmat > 0)
     row_sums = neighbors.sum(axis=1, keepdims=True).astype(float)
     no_neighbors = (row_sums == 0).flatten()
     row_sums[row_sums == 0] = 1

@@ -425,10 +425,11 @@ def test_spur_pipeline_native_fallback_parity_on_evaluated_complete_cases() -> N
         npt.assert_allclose(b.scpc.scpcstats, a.scpc.scpcstats, rtol=1e-8, atol=1e-8)
 
 
-def test_spur_nn_all_colocated_uses_other_sites_as_neighbors() -> None:
+@pytest.mark.parametrize("backend", ["fallback", "rust"])
+def test_spur_nn_requires_distinct_locations(backend: str) -> None:
     df = pd.DataFrame({"x": [0.0] * 3, "s": [1.0] * 3, "y": [1.0, 2.0, 6.0]})
-    for backend in ("fallback", "rust"):
-        transformed = spur.spurtransform(
+    with pytest.raises(ValueError, match="distinct locations"):
+        spur.spurtransform(
             "y ~ 1",
             df,
             coords_euclidean=("x", "s"),
@@ -436,4 +437,3 @@ def test_spur_nn_all_colocated_uses_other_sites_as_neighbors() -> None:
             backend=backend,
             nthreads=1,
         )
-        npt.assert_allclose(transformed["h_y"], [-3, -1.5, 4.5])

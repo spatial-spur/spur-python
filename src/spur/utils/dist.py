@@ -5,6 +5,9 @@ import pandas as pd
 from numpy.typing import ArrayLike
 
 
+EARTH_RADIUS_M = 6_371_000.009
+
+
 def resolve_spur_coords(
     data: pd.DataFrame,
     use_rows: np.ndarray,
@@ -99,15 +102,13 @@ def haversine_distance(
     lat2_arr = np.asarray(lat2, dtype=float)
     lon2_arr = np.asarray(lon2, dtype=float)
 
-    R = 6371000  # Earth radius in meters
-
     phi1 = np.radians(lat1_arr)
     phi2 = np.radians(lat2_arr)
     dphi = np.radians(lat2_arr - lat1_arr)
     dlam = np.radians(lon2_arr - lon1_arr)
 
     a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
-    return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    return 2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
 
 
 def get_distance_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:

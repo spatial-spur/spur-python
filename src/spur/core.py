@@ -23,6 +23,7 @@ from .types import (
     Tests,
 )
 from .utils.dist import (
+    EARTH_RADIUS_M,
     get_cbar,
     get_distance_matrix,
     normalized_distmat,
@@ -59,7 +60,6 @@ from .utils.matrix import (
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
 SPUR_RUST_API_VERSION = 3
-EARTH_RADIUS_M = 6_371_000.0
 EARTH_CIRCUMFERENCE_M = 2.0 * math.pi * EARTH_RADIUS_M
 
 
@@ -938,8 +938,14 @@ def spurtransform(
     """Apply a SPUR transformation to the variables referenced in a formula.
 
     Use this function when you want transformed versions of the variables in a
-    model formula. The function builds one transformation matrix and applies it to
-    each referenced variable, adding new columns with the chosen prefix.
+    model formula. The function applies the same spatial transformation to each
+    referenced variable and adds columns with the chosen prefix.
+
+    Nearest-neighbor differencing averages the observations tied at the
+    smallest positive distance. It requires at least two distinct locations.
+    Isotropic differencing averages neighbors at positive distances up to and
+    including the radius. Observations with no such neighbors transform to zero.
+    LBM-GLS centers each transformed column.
 
     Args:
         formula: Formula identifying the variables to transform.
@@ -952,8 +958,9 @@ def spurtransform(
         prefix: Prefix added to each transformed variable name.
         transformation: Transformation method. Must be one of `"nn"`, `"iso"`,
             `"lbmgls"`, or `"cluster"`.
-        radius: Radius used by the isotropic transformation. Required when
-            `transformation="iso"`.
+        radius: Radius used by the isotropic transformation in meters for
+            longitude and latitude or in the units of Euclidean coordinates.
+            Required when `transformation="iso"`.
         clustvar: Cluster label column used by the cluster transformation.
             Required when `transformation="cluster"`.
 
@@ -1063,10 +1070,11 @@ def spurtransform(
             coords=coords_rust,
             latlong=bool(latlon),
             radius=radius_arg,
-            strict_lt=True,
+            strict_lt=False,
+            exclude_zero_distances=True,
             cluster_id=cluster_codes,
             return_matrix=False,
-            demean_lbmgls=False,
+            demean_lbmgls=True,
             nthreads=resolved_nthreads,
         )
         transformed = np.asarray(rust_res["transformed"], dtype=float)
@@ -1087,6 +1095,8 @@ def spurtransform(
             M = lbmgls_matrix(coords_raw, latlon=latlon)
 
         transformed = M @ values
+        if transformation == "lbmgls":
+            transformed -= transformed.mean(axis=0)
 
     df = data.copy()
     for var, column in zip(variables.columns, transformed.T, strict=True):
@@ -1388,7 +1398,7 @@ def spur(
             int(nrep),
             np.ascontiguousarray(transform_input, dtype=np.float64),
             latlong=bool(latlong),
-            demean_lbmgls=False,
+            demean_lbmgls=True,
             nthreads=nthreads,
         )
 
@@ -1432,6 +1442,7 @@ def spur(
         stage_backends["transform"] = "rust"
     else:
         transformed = lbmgls_matrix(coords, latlon=latlong) @ transform_input
+        transformed -= transformed.mean(axis=0)
         stage_backends["transform"] = "fallback"
         if fallback_reason is not None:
             fallback_reasons["transform"] = fallback_reason
