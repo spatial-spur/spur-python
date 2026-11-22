@@ -6,6 +6,7 @@ from .matrix import (
     cholesky_upper,
     get_r,
     validate_and_project_y,
+    demean_matrix,
     get_sigma_dm,
     get_sigma_residual,
 )
@@ -84,6 +85,7 @@ def get_ha_param_i1(
 
     pow_ = 0.0
     ctry = get_cbar(0.01, distmat)
+    best_param, best_power = c, -1.0
     _iter = 0
     while pow_ < pow50:
         c = ctry
@@ -91,12 +93,11 @@ def get_ha_param_i1(
         om_c = R.T @ sigdm_c @ R
         pow_ = get_pow_qf(om_ho, om_c, e)
         ctry = 2 * ctry
+        if pow_ > best_power:
+            best_param, best_power = c, pow_
         _iter += 1
         if _iter >= _MAX_BRACKET and pow_ < pow50:
-            raise RuntimeError(
-                f"get_ha_param_i1: step-2 bracketing did not converge in {_MAX_BRACKET} iterations. "
-                "Power may be non-monotone for this dataset."
-            )
+            return best_param
 
     c2 = c
 
@@ -143,16 +144,17 @@ def get_ha_param_i0(
 
     pow_ = 0.0
     gtry = 30.0
+    best_param, best_power = g, -1.0
     _iter = 0
     while pow_ < 0.5:
         g = gtry
         pow_ = get_pow_qf(om_ho, om_i0 + g * om_bm, e)
         gtry = g * 2
+        if pow_ > best_power:
+            best_param, best_power = g, pow_
         _iter += 1
         if _iter >= _MAX_BRACKET and pow_ < 0.5:
-            raise RuntimeError(
-                f"get_ha_param_i0: step-2 bracketing did not converge in {_MAX_BRACKET} iterations."
-            )
+            return best_param
     g2 = g
 
     ii = 1
@@ -199,6 +201,7 @@ def get_ha_param_i1_residual(
 
     pow_ = 0.0
     ctry = get_cbar(0.01, distmat)
+    best_param, best_power = c, -1.0
     _iter = 0
     while pow_ < pow50:
         c = ctry
@@ -206,11 +209,11 @@ def get_ha_param_i1_residual(
         om_c = R.T @ sigdm_c @ R
         pow_ = get_pow_qf(om_ho, om_c, e)
         ctry = 2 * ctry
+        if pow_ > best_power:
+            best_param, best_power = c, pow_
         _iter += 1
         if _iter >= _MAX_BRACKET and pow_ < pow50:
-            raise RuntimeError(
-                f"get_ha_param_i1_residual: step-2 bracketing did not converge in {_MAX_BRACKET} iterations."
-            )
+            return best_param
     c2 = c
 
     ii = 0
@@ -230,151 +233,152 @@ def get_ha_param_i1_residual(
     return c
 
 
-def _half_life_exceedance_counts(
-    Y: np.ndarray,
-    distmat: np.ndarray,
-    emat: np.ndarray,
-    c_grid_ho: np.ndarray,
-    c_grid_ha: np.ndarray,
-) -> np.ndarray:
-    """
-    Count strict LR exceedances over c_grid_ho using the averaged Ha likelihood.
+def monte_carlo_cutoffs(draws: np.ndarray) -> np.ndarray:
+    """Critical values for rank tests at 1%, 5%, and 10%."""
+    ranks = (draws.size + 1) // np.array([100, 20, 10])
+    active = ranks > 0
+    cutoffs = np.full(3, np.inf)
+    indices = draws.size - ranks[active]
+    if indices.size:
+        cutoffs[active] = np.partition(draws, indices)[indices]
+    return cutoffs
 
-    Returns
-    -------
-    ndarray (n_c_ho,)
-        Number of simulated LR values above the observed LR at each c in c_grid_ho
-    """
-    q = emat.shape[0]
-    n_c_ho = len(c_grid_ho)
-    n_c_ha = len(c_grid_ha)
 
-    rho_bm = 0.999
-    c_bm = get_cbar(rho_bm, distmat)
-    sigdm_bm = get_sigma_dm(distmat, c_bm)
+def _half_life_mixture() -> tuple[np.ndarray, np.ndarray]:
+    nodes = np.array(
+        [
+            -0.906179845938664,
+            -0.5384693101056831,
+            0.0,
+            0.5384693101056831,
+            0.906179845938664,
+        ]
+    )
+    weights = np.array(
+        [
+            0.2369268850561891,
+            0.4786286704993665,
+            128 / 225,
+            0.4786286704993665,
+            0.2369268850561891,
+        ]
+    )
+    edges = np.r_[0, 2.0 ** np.arange(-9, 1)]
+    width = np.diff(edges)[:, None] / 2
+    points = edges[:-1, None] + width * (1 + nodes)
+    return points.ravel(), (width * weights).ravel()
 
-    R = get_r(sigdm_bm, q)
 
-    reference_shape = None
-    informative = False
-    ch_om_list = []
-    ch_omi_list = []
-    log_det_list = np.zeros(n_c_ho)
+def _compact_to_half_life(t: float) -> float:
+    return np.inf if t == 1 else t / (1 - t)
 
-    for i in range(n_c_ho):
-        c = c_grid_ho[i]
-        sigdm = get_sigma_dm(distmat, c)
-        om = R.T @ sigdm @ R
-        shape = om / np.trace(om)
-        if reference_shape is None:
-            reference_shape = shape
-        elif np.max(np.abs(shape - reference_shape)) > 1e-12:
-            informative = True
-        ch_om_list.append(cholesky_upper(om))
-        omi = np.linalg.inv(om)
-        ch_omi = cholesky_upper(omi)
-        ch_omi_list.append(ch_omi)
-        log_det_list[i] = np.sum(np.log(np.diag(ch_omi)))
 
-    ch_omi_ha_list = []
-    log_det_ha_list = np.zeros(n_c_ha)
-
-    for i in range(n_c_ha):
-        c = c_grid_ha[i]
-        sigdm = get_sigma_dm(distmat, c)
-        om = R.T @ sigdm @ R
-        shape = om / np.trace(om)
-        if np.max(np.abs(shape - reference_shape)) > 1e-12:
-            informative = True
-        omi = np.linalg.inv(om)
-        ch_omi = cholesky_upper(omi)
-        ch_omi_ha_list.append(ch_omi)
-        log_det_ha_list[i] = np.sum(np.log(np.diag(ch_omi)))
-
-    if not informative:
-        raise ValueError(
-            "Half-life experiment is uninformative: covariance shapes are proportional."
-        )
-    X = validate_and_project_y(Y, R)
-    counts = np.empty(n_c_ho, dtype=np.intp)
-    half_q = 0.5 * q
-    log_n_c_ha = np.log(n_c_ha)
-
-    for i in range(n_c_ho):
-        ch_null = ch_om_list[i]
-        e = ch_null.T @ emat
-
-        ch_omi = ch_omi_list[i]
-        log_det = log_det_list[i]
-        xc = ch_omi @ e
-        Xc = ch_omi @ X
-        with np.errstate(divide="ignore", invalid="ignore"):
-            log_den_ho = log_det - half_q * np.log(np.sum(xc**2, axis=0))
-            log_den_ho_X = log_det - half_q * np.log(np.sum(Xc**2))
-
-        log_den_ha_mat = np.empty((emat.shape[1], n_c_ha))
-        log_den_ha_mat_X = np.empty(n_c_ha)
-
-        for j in range(n_c_ha):
-            ch_omi_j = ch_omi_ha_list[j]
-            log_det_j = log_det_ha_list[j]
-            xc_j = ch_omi_j @ e
-            Xc_j = ch_omi_j @ X
-            with np.errstate(divide="ignore", invalid="ignore"):
-                log_den_ha_mat[:, j] = log_det_j - half_q * np.log(
-                    np.sum(xc_j**2, axis=0)
-                )
-                log_den_ha_mat_X[j] = log_det_j - half_q * np.log(np.sum(Xc_j**2))
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            log_lr = logsumexp(log_den_ha_mat, axis=1) - log_n_c_ha - log_den_ho
-            log_lr_X = logsumexp(log_den_ha_mat_X) - log_n_c_ha - log_den_ho_X
-
-        counts[i] = np.count_nonzero(log_lr > log_lr_X)
-
-    return counts
+def _invert_half_life(grid, accepted, accepts) -> np.ndarray:
+    """Bracket each detected transition and round the components outward."""
+    intervals = []
+    start = 0.0
+    for i in np.flatnonzero(accepted[:-1] != accepted[1:]):
+        left, right = grid[i : i + 2]
+        left_accepted = accepted[i]
+        while right - left > 1e-7:
+            mid = (left + right) / 2
+            if accepts(mid) == left_accepted:
+                left = mid
+            else:
+                right = mid
+        if left_accepted:
+            intervals.append(
+                (_compact_to_half_life(start), _compact_to_half_life(right))
+            )
+        else:
+            start = left
+    if accepted[-1]:
+        intervals.append((_compact_to_half_life(start), np.inf))
+    return np.asarray(intervals, dtype=float).reshape(-1, 2)
 
 
 def spur_persistence(
-    Y: np.ndarray, distmat: np.ndarray, emat: np.ndarray, level: float
-) -> tuple:
-    """
-    Report the smallest and largest accepted points on the half-life grid.
+    y: np.ndarray, distmat: np.ndarray, emat: np.ndarray, level: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Numerically invert the half-life rank tests in sample-diameter units."""
+    q, nrep = emat.shape
+    brownian = demean_matrix(-0.5 * distmat)
+    basis = get_r(brownian, q)
+    projected = basis - basis.mean(axis=0)
+    observed = validate_and_project_y(y, basis)
 
-    Parameters
-    ----------
-    Y : ndarray (n,)
-        Variable (centered)
-    distmat : ndarray (n, n)
-        Normalized distance matrix
-    emat : ndarray (q, nrep)
-        Monte Carlo draws
-    level : float
-        Confidence level in [0, 1]
+    def covariance(h: float) -> np.ndarray:
+        if h == 0:
+            kernel = distmat == 0
+        elif np.isinf(h):
+            kernel = -0.5 * distmat
+        else:
+            rate = np.log(2) / h
+            kernel = (
+                0.5 * np.expm1(-rate * distmat) / rate
+                if rate < 0.01
+                else np.exp(-rate * distmat)
+            )
+        omega = projected.T @ (kernel @ projected)
+        return 0.5 * (omega + omega.T)
 
-    Returns
-    -------
-    tuple (ci_lower, ci_upper)
-        Bounds on half-life (normalized; i.e., fraction of max distance)
-    """
-    n_hl = 100
-    hl_grid_ho = np.concatenate(
-        [np.linspace(0.001, 1, n_hl), np.linspace(1.01, 3, 30), [100.0]]
+    def precision_factor(omega):
+        return cholesky_upper(np.linalg.inv(omega))
+
+    def log_density(upper, values, log_det):
+        return log_det - 0.5 * q * np.log(np.sum((upper @ values) ** 2, axis=0))
+
+    grid = np.linspace(0.0, 1.0, 129)
+    h_grid = np.array([_compact_to_half_life(t) for t in grid])
+    null_covariances = [covariance(h) for h in h_grid]
+    mixture_h, mixture_weights = _half_life_mixture()
+    alternatives = [covariance(h) for h in mixture_h]
+    trace_scaled = null_covariances[0] / np.trace(null_covariances[0])
+    if all(
+        np.max(np.abs(m / np.trace(m) - trace_scaled)) <= 1e-10
+        for m in [*null_covariances[1:], *alternatives]
+    ):
+        raise ValueError(
+            "Half-life experiment is uninformative: covariance shapes are proportional."
+        )
+
+    factors = [precision_factor(omega) for omega in alternatives]
+    log_weights = [
+        np.log(w) + np.log(np.diag(upper)).sum()
+        for w, upper in zip(mixture_weights, factors)
+    ]
+    observed_mix = logsumexp(
+        [
+            log_density(upper, observed, log_weight)
+            for upper, log_weight in zip(factors, log_weights)
+        ]
     )
+    log_null_draw_norm = 0.5 * q * np.log(np.sum(emat**2, axis=0))
 
-    n_hl_ha = 50
-    hl_grid_ha = np.linspace(0.001, 1.0, n_hl_ha)
+    def exceedances(omega):
+        null = np.linalg.cholesky(omega)
+        precision = precision_factor(omega)
+        simulated = null @ emat
+        observed_score = observed_mix + 0.5 * q * np.log(
+            np.sum((precision @ observed) ** 2)
+        )
+        simulated_score = np.full(nrep, -np.inf)
+        for upper, log_weight in zip(factors, log_weights):
+            np.logaddexp(
+                simulated_score,
+                log_density(upper, simulated, log_weight),
+                out=simulated_score,
+            )
+        simulated_score += log_null_draw_norm
+        return np.count_nonzero(simulated_score >= observed_score)
 
-    c_grid_ho = -np.log(0.5) / hl_grid_ho
-    c_grid_ha = -np.log(0.5) / hl_grid_ha
-
-    counts = _half_life_exceedance_counts(Y, distmat, emat, c_grid_ho, c_grid_ha)
-    nrep = emat.shape[1]
-    # p > 1 - level, evaluated on the integer Monte Carlo grid without
-    # subtracting the floating-point confidence level from one.
-    ii = (nrep - counts) / nrep < level
-    if not ii.any():
-        return np.nan, np.nan
-
-    hl_ci = hl_grid_ho[ii]
-    return float(hl_ci.min()), float(hl_ci.max())
+    counts = np.array([exceedances(omega) for omega in null_covariances])
+    accepted = (nrep - counts) / (nrep + 1) < level
+    components = _invert_half_life(
+        grid,
+        accepted,
+        lambda t: (nrep - exceedances(covariance(_compact_to_half_life(t))))
+        / (nrep + 1)
+        < level,
+    )
+    return components, (1 + counts) / (nrep + 1), h_grid

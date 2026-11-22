@@ -41,7 +41,7 @@ def test_spur_diagnostics_frozen_emat_parity_geodesic_and_euclidean(
     q = 8
     nrep = 4000
     rng = np.random.default_rng(11)
-    base_emat = rng.standard_normal((q, nrep))
+    base_emat = rng.standard_normal((2 * q, nrep))
 
     configs = [("s_1", "s_2", None), (None, None, ["s_1", "s_2"])]
     for lon_c, lat_c, euc_c in configs:
@@ -90,7 +90,7 @@ def test_spur_diagnostics_frozen_emat_parity_geodesic_and_euclidean(
                 assert ru.rho_grid is not None and fb.rho_grid is not None
                 assert ru.pvalue_mat is not None and fb.pvalue_mat is not None
                 assert ru.cvalue_mat is not None and fb.cvalue_mat is not None
-                assert len(ru.rho_grid) == 30
+                assert len(ru.rho_grid) == 31
                 npt.assert_allclose(ru.rho_grid, fb.rho_grid, rtol=1e-12, atol=1e-12)
                 npt.assert_allclose(ru.pvalue_mat, fb.pvalue_mat, rtol=0.0, atol=1e-12)
                 npt.assert_allclose(ru.cvalue_mat, fb.cvalue_mat, rtol=1e-9, atol=1e-9)
@@ -190,8 +190,10 @@ def test_spur_halflife_frozen_emat_parity_and_invariants(
             )
 
             assert ru.backend == "rust"
-            assert ru.pv_mat is not None and len(ru.pv_mat) == 131
-            assert ru.hl_grid is not None and len(ru.hl_grid) == 131
+            assert ru.pv_mat is not None and len(ru.pv_mat) == 129
+            assert ru.hl_grid is not None and len(ru.hl_grid) == 129
+            npt.assert_array_equal(ru.pv_mat, fb.pv_mat)
+            npt.assert_allclose(ru.components, fb.components, rtol=1e-11, atol=1e-11)
             npt.assert_allclose(ru.max_dist, fb.max_dist, rtol=1e-12, atol=1e-12)
             npt.assert_allclose(ru.ci_lower, fb.ci_lower, rtol=1e-12, atol=1e-12)
             if np.isinf(fb.ci_upper):
@@ -322,7 +324,7 @@ def test_spur_pipeline_parity_and_thread_invariance() -> None:
     )
 
 
-def test_tied_eigenspace_triggers_auto_fallback_and_keeps_rust_explicit() -> None:
+def test_tied_eigenspaces_can_be_retained_only_as_whole_blocks() -> None:
     # A regular 16-gon has tied cosine/sine eigenspaces.
     k = np.arange(16)
     df = pd.DataFrame(
@@ -332,51 +334,13 @@ def test_tied_eigenspace_triggers_auto_fallback_and_keeps_rust_explicit() -> Non
             "y": np.sin(k * 1.3) + np.cos(k * 0.7),
         }
     )
-    ru = spur.spurtest_i0(
-        "y",
-        df,
-        coords_euclidean=["x_c", "y_c"],
-        q=8,
-        nrep=2000,
-        seed=42,
-        backend="rust",
-    )
-    auto_res = spur.spurtest_i0(
-        "y",
-        df,
-        coords_euclidean=["x_c", "y_c"],
-        q=8,
-        nrep=2000,
-        seed=42,
-        backend="auto",
-    )
-    assert ru.backend == "rust"
-    assert ru.tied is True
-    assert auto_res.backend == "fallback"
-    assert auto_res.tied is True
-
-    hl_ru = spur.spurhalflife(
-        "y",
-        df,
-        coords_euclidean=["x_c", "y_c"],
-        q=3,
-        nrep=300,
-        seed=42,
-        backend="rust",
-    )
-    hl_auto = spur.spurhalflife(
-        "y",
-        df,
-        coords_euclidean=["x_c", "y_c"],
-        q=3,
-        nrep=300,
-        seed=42,
-        backend="auto",
-    )
-    assert hl_ru.backend == "rust"
-    assert hl_ru.tied is True
-    assert hl_auto.backend == "fallback"
-    assert hl_auto.tied is True
+    opts = dict(coords_euclidean=["x_c", "y_c"], nrep=1000, seed=42)
+    for backend in ("auto", "rust", "fallback"):
+        for test in (spur.spurtest_i0, spur.spurhalflife):
+            with pytest.raises(ValueError, match="q splits a tied eigenspace"):
+                test("y", df, q=3, backend=backend, **opts)
+    result = spur.spurtest_i0("y", df, q=8, backend="auto", **opts)
+    assert result.backend == "rust" and result.tied
 
 
 def test_backend_validation_and_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

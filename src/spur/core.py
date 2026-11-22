@@ -38,6 +38,7 @@ from .utils.inference import (
     get_ha_param_i0,
     get_ha_param_i1,
     get_ha_param_i1_residual,
+    monte_carlo_cutoffs,
     spur_persistence,
 )
 from .utils.matrix import (
@@ -61,7 +62,8 @@ from .utils.matrix import (
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
-SPUR_RUST_API_VERSION = 4
+SPUR_RUST_API_VERSION = 5
+RUST_MIN_SPEC_VERSION = (0, 3, 7)
 
 
 def _different_covariance_shapes(a: np.ndarray, b: np.ndarray) -> bool:
@@ -108,7 +110,7 @@ def validate_nthreads(nthreads: object) -> int | None:
 
 
 def load_rust_backend() -> Any | None:
-    """Import the compiled Rust extension module if present and SPUR-compatible."""
+    """Import the Rust extension if its ABIs and methods version are compatible."""
     try:
         rust_mod = importlib.import_module("spatial_spur_rust")
     except ImportError:
@@ -116,6 +118,16 @@ def load_rust_backend() -> Any | None:
     if getattr(rust_mod, "API_VERSION", None) != RUST_API_VERSION:
         return None
     if getattr(rust_mod, "SPUR_API_VERSION", None) != SPUR_RUST_API_VERSION:
+        return None
+    build_info = getattr(rust_mod, "build_info", None)
+    if not callable(build_info):
+        return None
+    try:
+        version = build_info()["spec_version"]
+        spec = tuple(int(part) for part in version.split("."))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if len(spec) != 3 or spec < RUST_MIN_SPEC_VERSION:
         return None
     return rust_mod
 
@@ -129,7 +141,7 @@ def _require_rust_if_requested(resolved_backend: str) -> Any | None:
         raise RuntimeError(
             "Rust backend requested, but a compatible `spatial_spur_rust` is unavailable. "
             f"Build the matching development adapter with SPUR API {SPUR_RUST_API_VERSION} "
-            f"and SCPC API {RUST_API_VERSION}."
+            f"and SCPC API {RUST_API_VERSION}, with methods spec 0.3.7 or newer."
         )
     return rust_mod
 
@@ -191,11 +203,11 @@ def _try_rust_spur_test(
     resolved_backend: str,
     resolved_nthreads: int | None,
     x_in: np.ndarray | None = None,
-) -> tuple[TestResult | None, bool]:
-    """Execute one SPUR diagnostic test in Rust unless auto-falling back on tied eigenspaces."""
+) -> TestResult | None:
+    """Execute one SPUR diagnostic test with a compatible Rust build."""
     rust_mod = _require_rust_if_requested(resolved_backend)
     if rust_mod is None:
-        return None, False
+        return None
 
     coords_rust = _rust_coords(coords, latlong)
     y_rust = np.ascontiguousarray(y, dtype=np.float64).ravel()
@@ -227,15 +239,10 @@ def _try_rust_spur_test(
             nthreads=resolved_nthreads,
         )
 
-    tied = bool(rust_res["tied"])
-    if tied and resolved_backend == "auto":
-        return None, True
-    return _test_result_from_rust(test_type, rust_res, is_i0=is_i0), tied
+    return _test_result_from_rust(test_type, rust_res, is_i0=is_i0)
 
 
-def _fallback_reason(backend: str, tied: bool = False) -> str | None:
-    if tied:
-        return "tied_eigenspace"
+def _fallback_reason(backend: str) -> str | None:
     return "missing_or_incompatible_native_extension" if backend == "auto" else None
 
 
@@ -269,8 +276,8 @@ def _run_spur_test(
         # Patsy places a formula intercept first. Check other designs before dispatch.
         design_basis = orthonormal_design_basis(x_in)
         validate_constant_span(design_basis)
-    emat = _draw_emat(seed, q, nrep)
-    rust_res, tied = _try_rust_spur_test(
+    emat = _draw_emat(seed, 2 * q, nrep)
+    rust_res = _try_rust_spur_test(
         test_type,
         coords=coords,
         latlong=latlong,
@@ -287,14 +294,17 @@ def _run_spur_test(
     if x_in is not None and design_basis is None:
         design_basis = orthonormal_design_basis(x_in)
     distmat = normalized_distmat(coords, latlon=latlong)
-    basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
+    center_response = x_in is not None and bool(np.any(np.all(x_in == x_in[0], axis=0)))
+    basis = _prepare_fallback_spur_basis(
+        y, distmat, q, design_basis, center_response=center_response
+    )
     return _fallback_spur_test(
         test_type,
         distmat,
         emat,
         basis,
-        tied=tied,
-        fallback_reason=_fallback_reason(backend, tied),
+        tied=False,
+        fallback_reason=_fallback_reason(backend),
     )
 
 
@@ -312,6 +322,8 @@ def _prepare_fallback_spur_basis(
     distmat: np.ndarray,
     q: int,
     design_basis: np.ndarray | None,
+    *,
+    center_response: bool = False,
 ) -> _FallbackSpurBasis:
     projection = (
         None if design_basis is None else np.eye(len(y)) - design_basis @ design_basis.T
@@ -319,16 +331,25 @@ def _prepare_fallback_spur_basis(
     if projection is None:
         sigma_bm = demean_matrix(get_sigma_lbm(distmat))
     else:
-        c_bm = get_cbar(0.999, distmat)
-        sigma_bm = get_sigma_residual(distmat, c_bm, projection)
+        sigma_bm = projection @ (-0.5 * distmat) @ projection
     r = get_r(sigma_bm, q)
     response = (
         validate_and_project_y(y, r)
         if design_basis is None
-        else validate_and_project_residual_y(y, r, design_basis)
+        else validate_and_project_residual_y(
+            y, r, design_basis, center_response=center_response
+        )
     )
 
     def omega(c: float) -> np.ndarray:
+        if np.isposinf(c):
+            kernel = (distmat == 0.0).astype(float)
+            sigma = (
+                demean_matrix(kernel)
+                if projection is None
+                else projection @ kernel @ projection
+            )
+            return r.T @ sigma @ r
         sigma = (
             get_sigma_dm(distmat, c)
             if projection is None
@@ -360,6 +381,7 @@ def _fallback_spur_i0(
     tied: bool,
     fallback_reason: str | None,
 ) -> TestResult:
+    emat, tuning = np.split(emat, 2, axis=0)
     P = basis.response
     om_rho = basis.omega(get_cbar(0.001, distmat))
     om_bm = basis.brownian
@@ -370,7 +392,7 @@ def _fallback_spur_i0(
 
     om_i0 = om_rho
     om_ho = om_rho
-    ha_parm = get_ha_param_i0(om_ho, om_i0, om_bm, emat)
+    ha_parm = get_ha_param_i0(om_ho, om_i0, om_bm, tuning)
     om_ha = om_i0 + ha_parm * om_bm
 
     ch_omi_ho = cholesky_upper(np.linalg.inv(om_ho))
@@ -385,22 +407,25 @@ def _fallback_spur_i0(
     rho_min = 0.0001
     rho_max = 0.03
     n_rho = 30
-    rho_grid = np.linspace(rho_min, rho_max, n_rho)
+    floor = np.mean(distmat[np.tril_indices(len(distmat), -1)] == 0.0)
+    rho_grid = np.r_[floor, np.linspace(rho_min, rho_max, n_rho)]
+    n_rho = rho_grid.size
 
     pvalue_vec = np.zeros(n_rho)
     cvalue_mat = np.zeros((n_rho, 3))
-    sz_vec = np.array([0.01, 0.05, 0.10])
 
     for ir, rho in enumerate(rho_grid):
-        ch_om_ho_ir = cholesky_upper(basis.omega(get_cbar(rho, distmat)))
+        ch_om_ho_ir = cholesky_upper(
+            basis.omega(np.inf if ir == 0 else get_cbar(rho, distmat))
+        )
         y_ho = ch_om_ho_ir.T @ emat
         y_ho_ho = ch_omi_ho @ y_ho
         y_ho_ha = ch_omi_ha @ y_ho
         q_ho_ho = np.sum(y_ho_ho**2, axis=0)
         q_ho_ha = np.sum(y_ho_ha**2, axis=0)
         lr_ho = q_ho_ho / q_ho_ha
-        cvalue_mat[ir, :] = np.quantile(lr_ho, 1 - sz_vec)
-        pvalue_vec[ir] = np.mean(lr_ho > LR)
+        cvalue_mat[ir, :] = monte_carlo_cutoffs(lr_ho)
+        pvalue_vec[ir] = (1 + np.count_nonzero(lr_ho >= LR)) / (lr_ho.size + 1)
 
     cvalue = cvalue_mat.max(axis=0)
     pvalue = float(pvalue_vec.max())
@@ -428,14 +453,15 @@ def _fallback_spur_i1(
     tied: bool,
     fallback_reason: str | None,
 ) -> TestResult:
+    emat, tuning = np.split(emat, 2, axis=0)
     P = basis.response
     om_ho = basis.brownian
 
     _validate_i1_shapes(distmat, basis.omega)
     ha_parm = (
-        get_ha_param_i1(om_ho, distmat, basis.r, emat)
+        get_ha_param_i1(om_ho, distmat, basis.r, tuning)
         if basis.projection is None
-        else get_ha_param_i1_residual(om_ho, distmat, basis.r, emat, basis.projection)
+        else get_ha_param_i1_residual(om_ho, distmat, basis.r, tuning, basis.projection)
     )
     om_ha = basis.omega(ha_parm)
 
@@ -452,11 +478,10 @@ def _fallback_spur_i1(
     q_ho_ha = np.sum(y_ho_ha**2, axis=0)
     lr_ho = q_ho_ho / q_ho_ha
 
-    sz_vec = np.array([0.01, 0.05, 0.10])
-    cv_vec = np.quantile(lr_ho, 1 - sz_vec)
+    cv_vec = monte_carlo_cutoffs(lr_ho)
 
     LR = float((P.T @ omi_ho @ P) / (P.T @ omi_ha @ P))
-    pvalue = float(np.mean(lr_ho > LR))
+    pvalue = float((1 + np.count_nonzero(lr_ho >= LR)) / (lr_ho.size + 1))
 
     return TestResult(
         test_type=test_type,
@@ -1112,13 +1137,11 @@ def spurhalflife(
     nthreads: int | None = None,
 ) -> HalfLifeResult:
     """
-    Report the smallest and largest accepted spatial half-life grid points.
+    Invert spatial half-life tests by refining changes in acceptance.
 
-    The half-life is the distance at which spatial correlation = 1/2.
-    This uses the Müller–Watson replication grid, in fractions of the sample
-    diameter. Its largest tested points are 3 and 100. The historical upper
-    bound `inf` indicates acceptance at 100 diameters. Intermediate values
-    between 3 and 100 and the infinite half-life limit are untested.
+    The half-life is the distance at which spatial correlation equals one half.
+    The result contains detected components and their hull. Narrow components
+    between search probes can escape detection.
 
     Parameters
     ----------
@@ -1183,7 +1206,6 @@ def spurhalflife(
     Y = validate_y_variation(Y)
     emat = _draw_emat(seed, q, nrep)
 
-    tied_from_rust = False
     rust_mod = _require_rust_if_requested(resolved_backend)
     if rust_mod is not None:
         rust_res = rust_mod.run_spur_halflife(
@@ -1196,60 +1218,42 @@ def spurhalflife(
             latlong=bool(latlon),
             nthreads=resolved_nthreads,
         )
-        tied_from_rust = bool(rust_res["tied"])
-        if not (tied_from_rust and resolved_backend == "auto"):
-            max_dist = float(rust_res["max_dist"])
-            if latlon:
-                max_dist *= EARTH_CIRCUMFERENCE_M
-            ci_l = float(rust_res["ci_lower"])
-            ci_u = float(rust_res["ci_upper"])
-            if ci_u >= 100.0:
-                ci_u = float(np.inf)
-            if not normdist:
-                ci_l = ci_l * max_dist if not np.isnan(ci_l) else ci_l
-                ci_u = ci_u * max_dist if not np.isinf(ci_u) else ci_u
-            return HalfLifeResult(
-                ci_lower=ci_l,
-                ci_upper=ci_u,
-                max_dist=max_dist,
-                level=level,
-                normdist=normdist,
-                pv_mat=np.asarray(rust_res["pv_mat"], dtype=float).ravel(),
-                hl_grid=np.asarray(rust_res["hl_grid_ho"], dtype=float).ravel(),
-                backend="rust",
-                tied=tied_from_rust,
-                distance_units="meters" if latlon else "coordinate units",
+        max_dist = float(rust_res["max_dist"])
+        if latlon:
+            max_dist *= EARTH_CIRCUMFERENCE_M
+        components = np.asarray(rust_res["components"], dtype=float).reshape(-1, 2)
+        pvalues = np.asarray(rust_res["pv_mat"], dtype=float).ravel()
+        h_grid = np.asarray(rust_res["hl_grid_ho"], dtype=float).ravel()
+        tied = bool(rust_res["tied"])
+    else:
+        distmat_raw = get_distance_matrix(coords, latlon=latlon)
+        max_dist = float(distmat_raw.max())
+        if not np.isfinite(max_dist) or max_dist <= 0.0:
+            raise ValueError(
+                "Half-life inference requires at least two distinct locations."
             )
-
-    distmat_raw = get_distance_matrix(coords, latlon=latlon)
-
-    max_dist = float(distmat_raw.max())
-    if not np.isfinite(max_dist) or max_dist <= 0.0:
-        raise ValueError(
-            "All coordinates are identical — half-life normalization "
-            "requires distinct locations."
+        components, pvalues, h_grid = spur_persistence(
+            Y, distmat_raw / max_dist, emat, level / 100
         )
-    distmat = distmat_raw / max_dist
-
-    ci_l, ci_u = spur_persistence(Y, distmat, emat, level / 100)
-
-    if ci_u >= 100:
-        ci_u = np.inf
+        tied = False
 
     if not normdist:
-        ci_l = ci_l * max_dist if not np.isnan(ci_l) else ci_l
-        ci_u = ci_u * max_dist if not np.isinf(ci_u) else ci_u
-
+        components = components * max_dist
     return HalfLifeResult(
-        ci_lower=ci_l,
-        ci_upper=ci_u,
+        ci_lower=float(components[0, 0]) if components.size else np.nan,
+        ci_upper=float(components[-1, 1]) if components.size else np.nan,
         max_dist=max_dist,
         level=level,
         normdist=normdist,
-        backend="fallback",
-        tied=tied_from_rust,
+        pv_mat=pvalues,
+        hl_grid=h_grid,
+        components=components,
+        backend="rust" if rust_mod is not None else "fallback",
+        tied=tied,
         distance_units="meters" if latlon else "coordinate units",
-        fallback_reason=_fallback_reason(resolved_backend, tied_from_rust),
+        fallback_reason=_fallback_reason(resolved_backend)
+        if rust_mod is None
+        else None,
     )
 
 
@@ -1341,7 +1345,7 @@ def spur(
         coords_euclidean=coords_euclidean,
     )
     coords, latlong = coord_info["coords"], coord_info["latlong"]
-    emat = _draw_emat(seed, q, nrep)
+    emat = _draw_emat(seed, 2 * q, nrep)
 
     transform_idx = list(range(x.shape[1]))
     del transform_idx[intercept_slice]
@@ -1362,17 +1366,18 @@ def spur(
             nthreads=nthreads,
         )
 
-    any_tied = native is not None and any(native[k]["tied"] for k in test_types)
-    use_native = native is not None and (backend == "rust" or not any_tied)
+    use_native = native is not None
     distmat = None if use_native else normalized_distmat(coords, latlon=latlong)
     if not use_native:
         assert distmat is not None
         if design_basis is None:
             design_basis = orthonormal_design_basis(x)
         levels_basis = _prepare_fallback_spur_basis(y, distmat, q, None)
-        residual_basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
+        residual_basis = _prepare_fallback_spur_basis(
+            y, distmat, q, design_basis, center_response=True
+        )
     levels_model = fitted.fit()
-    fallback_reason = _fallback_reason(backend, any_tied)
+    fallback_reason = _fallback_reason(backend)
     stage_backends: dict[str, str] = {}
     fallback_reasons: dict[str, str] = {}
     tests: dict[str, TestResult] = {}

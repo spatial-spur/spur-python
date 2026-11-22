@@ -13,7 +13,7 @@ This page documents the public `spur-python` API.
 | `spurtest_i0resid()` | Residual-based `I(0)` test for a regression formula |
 | `spurtest_i1resid()` | Residual-based `I(1)` test for a regression formula |
 | `spurtransform()` | Transform all variables referenced in a formula |
-| `spurhalflife()` | Report accepted spatial half-life grid bounds |
+| `spurhalflife()` | Invert the spatial half-life tests |
 | `load_chetty_data()` | Load the packaged Chetty dataset |
 | `standardize()` | Standardize selected columns in a DataFrame |
 
@@ -314,10 +314,9 @@ spurtransform(
 
 ### `spurhalflife()`
 
-Report the smallest and largest accepted values on the Müller–Watson spatial
-half-life replication grid. The last two null grid points are 3 and 100 sample
-diameters. The historical value `ci_upper = inf` means that the null at 100
-diameters was accepted. The search evaluates only the specified grid points.
+Return the detected confidence-set components and their hull. The inversion
+evaluates zero and infinite half-life explicitly and brackets detected changes
+in acceptance. Narrow components can escape the initial search probes.
 
 **Signature**
 

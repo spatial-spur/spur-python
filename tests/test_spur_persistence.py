@@ -74,10 +74,12 @@ def test_spur_persistence_returns_ordered_interval(chetty_df: pd.DataFrame) -> N
     distmat = distmat / distmat.max()
     emat = np.random.default_rng(42).standard_normal((15, 200))
 
-    ci_lower, ci_upper = spur_persistence(y - y.mean(), distmat, emat, 0.95)
+    components, pvalues, points = spur_persistence(y - y.mean(), distmat, emat, 0.95)
+    ci_lower, ci_upper = components[0, 0], components[-1, 1]
+    assert points[0] == 0 and np.isinf(points[-1])
+    assert np.all(pvalues >= 1 / 201)
 
     assert np.isfinite(ci_lower)
-    assert np.isfinite(ci_upper)
     assert 0.0 < ci_lower <= ci_upper
 
 
@@ -92,32 +94,45 @@ def test_spur_persistence_matches_stata(
     distmat = distmat / distmat.max()
     emat = np.random.default_rng(42).standard_normal((15, NREP))
 
-    py_lower, py_upper = spur_persistence(y - y.mean(), distmat, emat, 0.95)
+    components, _, _ = spur_persistence(y - y.mean(), distmat, emat, 0.95)
+    py_lower, py_upper = components[0, 0], components[-1, 1]
     st_lower, st_upper = run_stata_spur_persistence(tmp_path, chetty_df)
 
     assert py_lower == pytest.approx(st_lower, abs=HALFLIFE_ATOL)
     if np.isnan(st_upper):
-        assert py_upper == 100.0
+        assert np.isinf(py_upper)
     else:
         assert py_upper == pytest.approx(st_upper, abs=HALFLIFE_ATOL)
 
 
-@pytest.mark.parametrize(
-    ("level", "nrep", "first_accepted"),
-    [(0.9, 10, 1), (0.95, 20, 1), (0.91, 10, 0)],
-)
-def test_spur_persistence_excludes_exact_nominal_threshold(
-    monkeypatch, level: float, nrep: int, first_accepted: int
-) -> None:
-    from spur.utils import inference
+def test_half_life_continuous_inversion_against_three_site_reference(monkeypatch):
+    import spur
+    import spur.core as spur_core
 
-    counts = np.zeros(131, dtype=int)
-    counts[:2] = [1, 2]
-    monkeypatch.setattr(inference, "_half_life_exceedance_counts", lambda *args: counts)
-    lower, upper = spur_persistence(np.ones(2), np.eye(2), np.ones((2, nrep)), level)
-    grid = np.linspace(0.001, 1, 100)
-    assert lower == grid[first_accepted]
-    assert upper == grid[1]
+    # Stratified angles serve as numerical quadrature for the two-dimensional
+    # null, whose exact population endpoint is available in the methods spec.
+    nrep = 32767
+    angles = (np.arange(nrep) + 0.5) * np.pi / (2 * nrep)
+    draws = np.array([np.cos(angles), np.sin(angles)])
+    monkeypatch.setattr(spur_core, "_draw_emat", lambda *_: draws)
+    data = pd.DataFrame({"s": [0.0, 1.0, 2.0], "y": [1.0, -6.0, 0.0]})
+    backends = ["fallback"]
+    if spur_core.load_rust_backend() is not None:
+        backends.append("rust")
+    for backend in backends:
+        result = spur.spurhalflife(
+            "y",
+            data,
+            coords_euclidean=["s"],
+            q=2,
+            nrep=nrep,
+            normdist=True,
+            backend=backend,
+        )
+        assert result.ci_lower == 0.0
+        assert result.ci_upper == pytest.approx(7.4073897366, abs=0.25)
+        assert result.components.shape == (1, 2)
+        assert result.pv_mat[-1] < 0.05
 
 
 def test_spur_persistence_high_q_avoids_overflow(monkeypatch) -> None:
@@ -174,4 +189,4 @@ def test_spur_persistence_high_q_avoids_overflow(monkeypatch) -> None:
     else:
         assert ru.ci_upper == pytest.approx(fb.ci_upper, rel=1e-12, abs=1e-12)
     assert ru.pv_mat is not None
-    assert len(ru.pv_mat) == 131 and np.all(np.isfinite(ru.pv_mat))
+    assert len(ru.pv_mat) == 129 and np.all(np.isfinite(ru.pv_mat))

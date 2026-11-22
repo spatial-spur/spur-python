@@ -80,8 +80,8 @@ def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
     prep_calls = []
     prepare = pipeline._prepare_fallback_spur_basis
 
-    def record_preparation(response, distances, q, design_basis):
-        basis = prepare(response, distances, q, design_basis)
+    def record_preparation(response, distances, q, design_basis, **kwargs):
+        basis = prepare(response, distances, q, design_basis, **kwargs)
         prep_calls.append((response, distances, basis))
         return basis
 
@@ -172,19 +172,6 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
         "load_rust_backend",
         lambda: SimpleNamespace(run_spur_pipeline=fake_pipeline),
     )
-    monkeypatch.setattr(
-        pipeline,
-        "_fallback_spur_test",
-        lambda test_type, *args, tied, fallback_reason: TestResult(
-            test_type,
-            1.0,
-            1.0,
-            np.array([1.0, 2.0, 3.0]),
-            0.01,
-            tied=tied,
-            fallback_reason=fallback_reason,
-        ),
-    )
 
     def fake_scpc(model, data, **kwargs):
         assert kwargs["backend"] == "auto"
@@ -204,20 +191,18 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
 
     assert result.fits.levels.model.model.formula == "y ~ x"
     assert result.fits.transformed.model.model.formula == "h_y ~ h_x"
-    assert result.backend == "fallback"
+    assert result.backend == "rust"
     assert result.tied
     assert result.stage_backends == {
-        "i0": "fallback",
-        "i1": "fallback",
-        "i0resid": "fallback",
-        "i1resid": "fallback",
-        "transform": "fallback",
+        "i0": "rust",
+        "i1": "rust",
+        "i0resid": "rust",
+        "i1resid": "rust",
+        "transform": "rust",
         "levels_scpc": "rust",
         "transformed_scpc": "rust",
     }
-    assert result.fallback_reasons == dict.fromkeys(
-        ("i0", "i1", "i0resid", "i1resid", "transform"), "tied_eigenspace"
-    )
+    assert not result.fallback_reasons
     assert not result.tests.i0.tied and result.tests.i0resid.tied
 
 

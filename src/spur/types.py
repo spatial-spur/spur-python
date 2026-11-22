@@ -52,12 +52,12 @@ class TestResult:
 
 @dataclass
 class HalfLifeResult:
-    """Smallest and largest accepted points on the spatial half-life grid."""
+    """Numerically inverted spatial half-life confidence set."""
 
     ci_lower: float
-    """Smallest accepted grid point."""
+    """Lower endpoint of the confidence-set hull."""
     ci_upper: float
-    """Largest accepted grid point, with infinity indicating acceptance at 100 diameters."""
+    """Upper endpoint of the confidence-set hull."""
     max_dist: float
     """Largest observed distance in the sample."""
     level: float
@@ -65,33 +65,40 @@ class HalfLifeResult:
     normdist: bool
     """Whether distances were normalized before reporting."""
     pv_mat: np.ndarray | None = field(default=None, repr=False, compare=False)
-    """Null half-life grid p-values when available."""
+    """P-values at the initial search points."""
     hl_grid: np.ndarray | None = field(default=None, repr=False, compare=False)
-    """Null half-life grid points in normalized units."""
+    """Initial half-life search points in sample-diameter units."""
     backend: str = field(default="fallback", repr=False, compare=False)
     """Execution backend used to compute this result."""
     tied: bool = field(default=False, repr=False, compare=False)
-    """Whether the eigenspace cutoff exhibited numerical ties."""
+    """Whether the native solver reported a tie inside the retained basis."""
 
     distance_units: str = "meters"
     """Units of max_dist and, when normdist is false, of the interval bounds."""
     fallback_reason: str | None = field(default=None, repr=False, compare=False)
     """Reason an automatically selected native calculation used the fallback."""
+    components: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 2)), repr=False, compare=False
+    )
+    """Detected confidence-set components in the reporting units."""
 
     def summary(self) -> str:
         """Format results for display."""
         units = "fractions of max distance" if self.normdist else self.distance_units
-        upper = f"{self.ci_upper:.6g}"
-        if np.isposinf(self.ci_upper):
-            upper += " (grid point at 100 sample diameters accepted)"
         lines = [
-            f"Spatial half-life {self.level:g}% replication grid bounds ({units})",
-            "-" * 45,
-            f"Lower bound: {self.ci_lower:.6g}",
-            f"Upper bound: {upper}",
-            f"Max distance in sample: {self.max_dist:.6g} {self.distance_units}",
+            f"Spatial half-life {self.level:g}% confidence set ({units})",
             "-" * 45,
         ]
+        if self.components.size:
+            lines.extend(f"[{lo:.6g}, {hi:.6g}]" for lo, hi in self.components)
+        else:
+            lines.append("Empty confidence set")
+        lines.extend(
+            [
+                f"Max distance in sample {self.max_dist:.6g} {self.distance_units}",
+                "-" * 45,
+            ]
+        )
         return "\n".join(lines)
 
 

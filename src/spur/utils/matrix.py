@@ -71,6 +71,11 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
             "SPUR covariance basis has insufficient positive rank for requested q."
         )
 
+    if qmax < n and tail - eigenvalues[qmax] <= 1.6e-11 * max(1.0, lead):
+        raise ValueError(
+            "Requested q splits a tied eigenspace. Choose q at an eigenvalue gap."
+        )
+
     R = eigenvectors[:, :qmax].copy()
     for j in range(R.shape[1]):
         col = R[:, j]
@@ -193,7 +198,11 @@ def validate_constant_span(design_basis: np.ndarray) -> None:
 
 
 def validate_and_project_residual_y(
-    y: np.ndarray, basis_r: np.ndarray, design_basis: np.ndarray
+    y: np.ndarray,
+    basis_r: np.ndarray,
+    design_basis: np.ndarray,
+    *,
+    center_response: bool,
 ) -> np.ndarray:
     """Residualize finite non-constant Y against Q_x and project onto SPUR basis R."""
     y_arr = np.asarray(y, dtype=float).reshape(-1)
@@ -206,13 +215,14 @@ def validate_and_project_residual_y(
             "Response Y has zero variation; SPUR inference requires non-constant Y."
         )
 
-    # The nuisance space spans a constant, so remove it before scaling.
-    # Scaling first could otherwise erase useful variation near a large offset.
-    with np.errstate(over="ignore"):
-        centered = y_arr - y_arr[0]
-    if not np.isfinite(centered).all():
-        scaled = y_arr / np.max(np.abs(y_arr))
-        centered = scaled - scaled[0]
+    centered = y_arr
+    if center_response:
+        # An exact constant column allows subtraction before scaling.
+        with np.errstate(over="ignore"):
+            centered = y_arr - y_arr[0]
+        if not np.isfinite(centered).all():
+            scaled = y_arr / np.max(np.abs(y_arr))
+            centered = scaled - scaled[0]
 
     col_scaled = centered / np.max(np.abs(centered))
     col_norm = float(np.linalg.norm(col_scaled))

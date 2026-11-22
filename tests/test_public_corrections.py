@@ -19,6 +19,28 @@ RUST_PARAMETER = pytest.param(
 
 
 @pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_nearly_constant_design_preserves_residual_inference(backend):
+    s = np.linspace(0.0, 1.0, 60)
+    x = 1.0 + 1e-8 * s
+    y = np.random.default_rng(123).normal(size=s.size)
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["s"], q=8, nrep=3000, seed=42, nthreads=1
+    )
+    for test in (spur.spurtest_i0resid, spur.spurtest_i1resid):
+        base = test(
+            "y ~ 0 + x", pd.DataFrame(dict(y=y, s=s, x=x)), backend=backend, **opts
+        )
+        shifted = test(
+            "y ~ 0 + x",
+            pd.DataFrame(dict(y=y + 1e9 * x, s=s, x=x)),
+            backend=backend,
+            **opts,
+        )
+        assert shifted.LR == pytest.approx(base.LR, rel=1e-6)
+        assert shifted.pvalue == base.pvalue
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_residual_dimension_and_units(backend):
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
@@ -122,15 +144,17 @@ def test_residual_dimension_boundary_is_valid(backend):
         seed=3,
         backend=backend,
     )
-    assert result.pvalue == pytest.approx(0.72)
+    assert result.pvalue == pytest.approx(330 / 501)
 
 
-def test_power_calibration_reports_unbracketable_experiment(monkeypatch):
+def test_power_calibration_returns_best_trial_when_target_is_unreachable(monkeypatch):
     from spur.utils import inference
 
     monkeypatch.setattr(inference, "get_pow_qf", lambda *args: 0.0)
-    with pytest.raises(RuntimeError, match="step-2 bracketing did not converge in 200"):
-        inference.get_ha_param_i0(np.eye(2), np.eye(2), np.eye(2), np.ones((2, 10)))
+    assert (
+        inference.get_ha_param_i0(np.eye(2), np.eye(2), np.eye(2), np.ones((2, 3)))
+        == 30.0
+    )
 
 
 @pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
@@ -182,13 +206,18 @@ def test_zero_projected_signal_is_rejected(backend):
         )
 
 
-def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
+@pytest.mark.parametrize("spur_api, spec", [(4, "0.3.7"), (5, "0.3.6")])
+def test_incompatible_spur_extension_uses_fallback(monkeypatch, spur_api, spec):
     from types import SimpleNamespace
     import importlib
     import scpc.core as scpc_core
     import spur.core as spur_core
 
-    stale = SimpleNamespace(API_VERSION=7, SPUR_API_VERSION=3)
+    stale = SimpleNamespace(
+        API_VERSION=7,
+        SPUR_API_VERSION=spur_api,
+        build_info=lambda: {"spec_version": spec},
+    )
     original_import = importlib.import_module
     monkeypatch.setattr(
         importlib,
@@ -212,7 +241,7 @@ def test_stale_spur_extension_falls_back_without_disabling_scpc(monkeypatch):
     result = spur.spurtest_i0resid("y ~ x", d, q=10, backend="auto", **opts)
     assert result.backend == "fallback"
     assert result.fallback_reason == "missing_or_incompatible_native_extension"
-    with pytest.raises(RuntimeError, match="SPUR API 4"):
+    with pytest.raises(RuntimeError, match="SPUR API 5"):
         spur.spurtest_i0resid("y ~ x", d, q=10, backend="rust", **opts)
     with pytest.raises(ValueError, match="residual dimension"):
         spur.spurtest_i0resid("y ~ x", d, q=11, backend="auto", **opts)

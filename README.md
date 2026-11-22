@@ -117,18 +117,12 @@ or loadings can affect Monte Carlo reproducibility across backends.
 The fixed I(0) calibration grid requires fewer than `0.0001` of the observation
 pairs to share a location. This also applies to the I(0) diagnostics in `spur()`.
 
-`spurhalflife()` returns the smallest and largest accepted points on the
-Müller–Watson replication grid. The grid is expressed in fractions of the
-sample diameter and its last two points are 3 and 100. An upper bound of
-`inf` follows the replication convention when the point at 100 is accepted.
-Inference applies to the evaluated grid points. Distance units are metres for
-geographic coordinates and the supplied units for Euclidean coordinates.
-Use `backend="auto"` (the default), `"rust"`, or `"fallback"` to select
-execution. `SPATIAL_BACKEND` applies when you omit the argument.
-Set `nthreads=1` for a single Rust worker. Linear algebra providers manage
-their own internal threading. For process-based parallelism after native
-threads have been used, start workers with
-`spawn` or `forkserver`.
+`spurhalflife()` inverts the continuous half-life rank tests and returns detected
+components and their hull. It evaluates zero and infinite half-life explicitly.
+The search brackets detected transitions on `h / (1 + h)` in sample-diameter
+units. Components narrower than the probe spacing can escape detection.
+Distance units are metres for geographic coordinates and the original units
+for Euclidean coordinates.
 
 `spur()` evaluates the formula once and runs all diagnostics and both fits on
 the same complete-case sample. It applies the LBM-GLS transform to the evaluated
@@ -160,7 +154,8 @@ This development branch requires the matching `scpc-python` checkout at version
 `uv sync --locked` from `spur-python`. This setup supports the pure-Python backend.
 
 For Rust, install the native adapter from the matching sibling `spatial-rust`
-checkout. The adapter must provide SPUR API 4 and SCPC API 7.
+checkout. The adapter must provide SPUR API 5, SCPC API 7, and methods spec
+0.3.7 or newer.
 
 ```bash
 uv pip install ../spatial-rust/crates/spatial-py
