@@ -114,23 +114,25 @@ information raise `ValueError`. The backends use the same convention for
 orienting eigenvectors before applying seeded draws. Nearly tied eigenvalues
 or loadings can affect Monte Carlo reproducibility across backends.
 
-The fixed I(0) calibration grid requires fewer than `0.0001` of the observation
-pairs to share a location. This also applies to the I(0) diagnostics in `spur()`.
+The I(0) tests calibrate over attainable average pairwise correlations up to
+0.03, including the co-location limit. If more than 3% of observation pairs
+share a location, the I(0) null is empty.
 
 `spurhalflife()` inverts the continuous half-life rank tests and returns detected
 components and their hull. It evaluates zero and infinite half-life explicitly.
-The search brackets detected transitions on `h / (1 + h)` in sample-diameter
-units. Components narrower than the probe spacing can escape detection.
+The search adds short-half-life probes based on the smallest positive inter-site
+distance and refines detected transitions on `h / (1 + h)`. Narrow components
+or gaps between probes can escape detection.
 Distance units are metres for geographic coordinates and the original units
 for Euclidean coordinates.
 
 `spur()` evaluates the formula once and runs all diagnostics and both fits on
 the same complete-case sample. It applies the LBM-GLS transform to the evaluated
-outcome and each non-intercept design column. The result reports the actual
-backend of each calculation in `stage_backends` and explains automatic changes
-in `fallback_reasons`. With `backend="auto"`, a native eigenspace tie reruns
-all four diagnostics and the transformation together in Python using the same
-simulation draws. Each SCPC fit selects its own backend.
+outcome and each non-intercept design column. LBM-GLS retains normalized
+covariance eigenvalues above `1e-10`. The result reports each backend in
+`stage_backends` and explains automatic dispatch in `fallback_reasons`.
+Comparing both fits is a sensitivity analysis. Coverage after choosing a branch
+using the same data requires a separate justification.
 
 The combined workflow requires a formula intercept, as in `y ~ C(region)`.
 Standalone residual tests also accept a full set of indicators, as in
@@ -155,7 +157,7 @@ This development branch requires the matching `scpc-python` checkout at version
 
 For Rust, install the native adapter from the matching sibling `spatial-rust`
 checkout. The adapter must provide SPUR API 5, SCPC API 7, and methods spec
-0.3.7 or newer.
+0.3.8 or newer.
 
 ```bash
 uv pip install ../spatial-rust/crates/spatial-py

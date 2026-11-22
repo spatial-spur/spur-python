@@ -1,14 +1,15 @@
+from collections.abc import Callable
+
 import numpy as np
+from scipy.linalg import solve_triangular
 from scipy.special import logsumexp
 
 from .dist import get_cbar
 from .matrix import (
-    cholesky_upper,
     get_r,
     validate_and_project_y,
     demean_matrix,
     get_sigma_dm,
-    get_sigma_residual,
 )
 
 
@@ -30,16 +31,10 @@ def get_pow_qf(om0: np.ndarray, om1: np.ndarray, e: np.ndarray) -> float:
     float
         Power (probability of rejecting H0 at 5% level)
     """
-    om0i = np.linalg.inv(om0)
-    om1i = np.linalg.inv(om1)
-
-    ch_om0 = cholesky_upper(om0)
-    ch_om1 = cholesky_upper(om1)
-    ch_om0i = cholesky_upper(om0i)
-    ch_om1i = cholesky_upper(om1i)
-
-    ho = ch_om1i @ ch_om0.T
-    ha = ch_om0i @ ch_om1.T
+    ch_om0 = np.linalg.cholesky(om0)
+    ch_om1 = np.linalg.cholesky(om1)
+    ho = solve_triangular(ch_om1, ch_om0, lower=True)
+    ha = solve_triangular(ch_om0, ch_om1, lower=True)
 
     qe = np.sum(e**2, axis=0)
     ya_o = ho @ e
@@ -56,68 +51,81 @@ def get_pow_qf(om0: np.ndarray, om1: np.ndarray, e: np.ndarray) -> float:
     return pow_
 
 
+def fit_spur_i1(
+    om_ho: np.ndarray,
+    distmat: np.ndarray,
+    e: np.ndarray,
+    covariance: Callable[[float], np.ndarray],
+) -> tuple[float, np.ndarray]:
+    """Tune the I(1) alternative on the independent draws."""
+    floor = np.count_nonzero(distmat == 0.0) - len(distmat)
+    floor /= len(distmat) * (len(distmat) - 1)
+    min_distance = float(np.min(distmat, where=distmat > 0, initial=np.inf))
+    lower, middle, upper = (
+        get_cbar(floor + (1 - floor) * rho, distmat) for rho in (0.95, 0.5, 0.01)
+    )
+    low_cov, mid_cov, high_cov = (covariance(c) for c in (lower, middle, upper))
+    null_shape = om_ho / np.trace(om_ho)
+    if all(
+        np.max(np.abs(omega / np.trace(omega) - null_shape)) <= 1e-12
+        for omega in (low_cov, mid_cov, high_cov)
+    ):
+        raise ValueError(
+            "SPUR experiment is uninformative: covariance shapes are proportional."
+        )
+
+    power = get_pow_qf(om_ho, low_cov, e)
+    for _ in range(199):
+        if power <= 0.5:
+            break
+        lower *= 0.5
+        power = get_pow_qf(om_ho, covariance(lower), e)
+    if power > 0.5:
+        raise RuntimeError("SPUR I(1) step-1 bracketing did not converge.")
+
+    omega = high_cov
+    power = get_pow_qf(om_ho, omega, e)
+    rate = upper
+    best_rate, best_cov, best_power = rate, omega, power
+    for _ in range(199):
+        if power >= 0.5:
+            break
+        if np.exp(-upper * min_distance) == 0:
+            return best_rate, best_cov
+        upper *= 2
+        rate = upper
+        omega = covariance(rate)
+        power = get_pow_qf(om_ho, omega, e)
+        if power > best_power:
+            best_rate, best_cov, best_power = rate, omega, power
+    if power < 0.5:
+        return best_rate, best_cov
+
+    for _ in range(20):
+        if abs(power - 0.5) <= 0.01:
+            break
+        rate = (lower + upper) / 2
+        omega = covariance(rate)
+        power = get_pow_qf(om_ho, omega, e)
+        if power > 0.5:
+            upper = rate
+        else:
+            lower = rate
+    return rate, omega
+
+
+def precision_factor(lower: np.ndarray) -> np.ndarray:
+    """Return the triangular factor used in the covariance quadratic form."""
+    return solve_triangular(lower, np.eye(len(lower)), lower=True)
+
+
 def get_ha_param_i1(
     om_ho: np.ndarray, distmat: np.ndarray, R: np.ndarray, e: np.ndarray
 ) -> float:
-    """
-    Find alternative hypothesis parameter c that yields ~50% power for I(1) test.
-    """
-    pow50 = 0.5
-    pow_ = 1.0
-    ctry = get_cbar(0.95, distmat)
-    _MAX_BRACKET = 200
-
-    _iter = 0
-    while pow_ > pow50:
-        c = ctry
-        sigdm_c = get_sigma_dm(distmat, c)
-        om_c = R.T @ sigdm_c @ R
-        pow_ = get_pow_qf(om_ho, om_c, e)
-        ctry = ctry / 2
-        _iter += 1
-        if _iter >= _MAX_BRACKET and pow_ > pow50:
-            raise RuntimeError(
-                f"get_ha_param_i1: step-1 bracketing did not converge in {_MAX_BRACKET} iterations. "
-                "Power may be non-monotone for this dataset."
-            )
-
-    c1 = c
-
-    pow_ = 0.0
-    ctry = get_cbar(0.01, distmat)
-    best_param, best_power = c, -1.0
-    _iter = 0
-    while pow_ < pow50:
-        c = ctry
-        sigdm_c = get_sigma_dm(distmat, c)
-        om_c = R.T @ sigdm_c @ R
-        pow_ = get_pow_qf(om_ho, om_c, e)
-        ctry = 2 * ctry
-        if pow_ > best_power:
-            best_param, best_power = c, pow_
-        _iter += 1
-        if _iter >= _MAX_BRACKET and pow_ < pow50:
-            return best_param
-
-    c2 = c
-
-    ii = 0
-    while abs(pow_ - pow50) > 0.01:
-        c = (c1 + c2) / 2
-        sigdm_c = get_sigma_dm(distmat, c)
-        om_c = R.T @ sigdm_c @ R
-        pow_ = get_pow_qf(om_ho, om_c, e)
-
-        if pow_ > pow50:
-            c2 = c
-        else:
-            c1 = c
-
-        ii += 1
-        if ii > 20:
-            break
-
-    return c
+    """Return the I(1) alternative decay for a levels basis."""
+    return fit_spur_i1(om_ho, distmat, e, lambda c: R.T @ get_sigma_dm(distmat, c) @ R)[
+        0
+    ]
 
 
 def get_ha_param_i0(
@@ -176,61 +184,11 @@ def get_ha_param_i0(
 def get_ha_param_i1_residual(
     om_ho: np.ndarray, distmat: np.ndarray, R: np.ndarray, e: np.ndarray, M: np.ndarray
 ) -> float:
-    """
-    Find alternative parameter c yielding ~50% power for I(1) residual test.
-    Same structure as get_ha_param_i1 but uses get_sigma_residual.
-    """
-    pow50 = 0.5
-    pow_ = 1.0
-    ctry = get_cbar(0.95, distmat)
-    _MAX_BRACKET = 200
-
-    _iter = 0
-    while pow_ > pow50:
-        c = ctry
-        sigdm_c = get_sigma_residual(distmat, c, M)
-        om_c = R.T @ sigdm_c @ R
-        pow_ = get_pow_qf(om_ho, om_c, e)
-        ctry = ctry / 2
-        _iter += 1
-        if _iter >= _MAX_BRACKET and pow_ > pow50:
-            raise RuntimeError(
-                f"get_ha_param_i1_residual: step-1 bracketing did not converge in {_MAX_BRACKET} iterations."
-            )
-    c1 = c
-
-    pow_ = 0.0
-    ctry = get_cbar(0.01, distmat)
-    best_param, best_power = c, -1.0
-    _iter = 0
-    while pow_ < pow50:
-        c = ctry
-        sigdm_c = get_sigma_residual(distmat, c, M)
-        om_c = R.T @ sigdm_c @ R
-        pow_ = get_pow_qf(om_ho, om_c, e)
-        ctry = 2 * ctry
-        if pow_ > best_power:
-            best_param, best_power = c, pow_
-        _iter += 1
-        if _iter >= _MAX_BRACKET and pow_ < pow50:
-            return best_param
-    c2 = c
-
-    ii = 0
-    while abs(pow_ - pow50) > 0.01:
-        c = (c1 + c2) / 2
-        sigdm_c = get_sigma_residual(distmat, c, M)
-        om_c = R.T @ sigdm_c @ R
-        pow_ = get_pow_qf(om_ho, om_c, e)
-        if pow_ > pow50:
-            c2 = c
-        else:
-            c1 = c
-        ii += 1
-        if ii > 20:
-            break
-
-    return c
+    """Return the I(1) alternative decay for a residual basis."""
+    projected = M @ R
+    return fit_spur_i1(
+        om_ho, distmat, e, lambda c: projected.T @ np.exp(-c * distmat) @ projected
+    )[0]
 
 
 def monte_carlo_cutoffs(draws: np.ndarray) -> np.ndarray:
@@ -244,7 +202,7 @@ def monte_carlo_cutoffs(draws: np.ndarray) -> np.ndarray:
     return cutoffs
 
 
-def _half_life_mixture() -> tuple[np.ndarray, np.ndarray]:
+def _half_life_mixture(min_distance: float) -> tuple[np.ndarray, np.ndarray]:
     nodes = np.array(
         [
             -0.906179845938664,
@@ -263,7 +221,11 @@ def _half_life_mixture() -> tuple[np.ndarray, np.ndarray]:
             0.2369268850561891,
         ]
     )
-    edges = np.r_[0, 2.0 ** np.arange(-9, 1)]
+    near_zero = max(min_distance / 32, np.finfo(float).tiny)
+    exponent = -9
+    while 2.0**exponent > near_zero:
+        exponent -= 1
+    edges = np.r_[0, 2.0 ** np.arange(exponent, 1)]
     width = np.diff(edges)[:, None] / 2
     points = edges[:-1, None] + width * (1 + nodes)
     return points.ravel(), (width * weights).ravel()
@@ -273,6 +235,16 @@ def _compact_to_half_life(t: float) -> float:
     return np.inf if t == 1 else t / (1 - t)
 
 
+def _half_life_search_grid(min_distance: float) -> np.ndarray:
+    short = []
+    h = 1 / 127
+    near_zero = max(min_distance / 32, np.finfo(float).tiny)
+    while h > near_zero:
+        h *= 0.8408964152537145
+        short.append(h / (1 + h))
+    return np.r_[0, short[::-1], np.linspace(1 / 128, 1, 128)]
+
+
 def _invert_half_life(grid, accepted, accepts) -> np.ndarray:
     """Bracket each detected transition and round the components outward."""
     intervals = []
@@ -280,7 +252,8 @@ def _invert_half_life(grid, accepted, accepts) -> np.ndarray:
     for i in np.flatnonzero(accepted[:-1] != accepted[1:]):
         left, right = grid[i : i + 2]
         left_accepted = accepted[i]
-        while right - left > 1e-7:
+        tolerance = min(1e-7, 1e-5 * (right - left))
+        while right - left > tolerance:
             mid = (left + right) / 2
             if accepts(mid) == left_accepted:
                 left = mid
@@ -313,36 +286,34 @@ def spur_persistence(
         elif np.isinf(h):
             kernel = -0.5 * distmat
         else:
-            rate = np.log(2) / h
-            kernel = (
-                0.5 * np.expm1(-rate * distmat) / rate
-                if rate < 0.01
-                else np.exp(-rate * distmat)
-            )
+            rate = float(np.log(2)) / float(h)
+            if rate < 0.01:
+                kernel = 0.5 * np.expm1(-rate * distmat) / rate
+            else:
+                with np.errstate(over="ignore"):
+                    kernel = np.exp(-np.log(2) * (distmat / h))
         omega = projected.T @ (kernel @ projected)
         return 0.5 * (omega + omega.T)
-
-    def precision_factor(omega):
-        return cholesky_upper(np.linalg.inv(omega))
 
     def log_density(upper, values, log_det):
         return log_det - 0.5 * q * np.log(np.sum((upper @ values) ** 2, axis=0))
 
-    grid = np.linspace(0.0, 1.0, 129)
+    min_distance = float(np.min(distmat, where=distmat > 0, initial=np.inf))
+    grid = _half_life_search_grid(min_distance)
     h_grid = np.array([_compact_to_half_life(t) for t in grid])
     null_covariances = [covariance(h) for h in h_grid]
-    mixture_h, mixture_weights = _half_life_mixture()
+    mixture_h, mixture_weights = _half_life_mixture(min_distance)
     alternatives = [covariance(h) for h in mixture_h]
     trace_scaled = null_covariances[0] / np.trace(null_covariances[0])
     if all(
-        np.max(np.abs(m / np.trace(m) - trace_scaled)) <= 1e-10
+        np.max(np.abs(m / np.trace(m) - trace_scaled)) <= 1e-12
         for m in [*null_covariances[1:], *alternatives]
     ):
         raise ValueError(
             "Half-life experiment is uninformative: covariance shapes are proportional."
         )
 
-    factors = [precision_factor(omega) for omega in alternatives]
+    factors = [precision_factor(np.linalg.cholesky(omega)) for omega in alternatives]
     log_weights = [
         np.log(w) + np.log(np.diag(upper)).sum()
         for w, upper in zip(mixture_weights, factors)
@@ -357,10 +328,9 @@ def spur_persistence(
 
     def exceedances(omega):
         null = np.linalg.cholesky(omega)
-        precision = precision_factor(omega)
         simulated = null @ emat
         observed_score = observed_mix + 0.5 * q * np.log(
-            np.sum((precision @ observed) ** 2)
+            np.sum(solve_triangular(null, observed, lower=True) ** 2)
         )
         simulated_score = np.full(nrep, -np.inf)
         for upper, log_weight in zip(factors, log_weights):

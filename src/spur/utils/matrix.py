@@ -71,7 +71,8 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
             "SPUR covariance basis has insufficient positive rank for requested q."
         )
 
-    if qmax < n and tail - eigenvalues[qmax] <= 1.6e-11 * max(1.0, lead):
+    gap_tol = max(1.6e-11 * lead, 8 * np.finfo(float).eps * n)
+    if qmax < n and tail - eigenvalues[qmax] <= gap_tol:
         raise ValueError(
             "Requested q splits a tied eigenspace. Choose q at an eigenvalue gap."
         )
@@ -146,31 +147,49 @@ def orthonormal_design_basis(x_in: np.ndarray, tol: float = 1e-10) -> np.ndarray
     return q_mat
 
 
-def validate_y_variation(y: np.ndarray) -> np.ndarray:
-    """Validate response vector is finite and non-constant, returning demeaned values."""
+def _offset_response(y: np.ndarray) -> tuple[np.ndarray, float]:
+    """Validate a response and subtract its midrange without overflow."""
     y_arr = np.asarray(y, dtype=float).reshape(-1)
     if y_arr.size == 0 or not np.all(np.isfinite(y_arr)):
         raise ValueError(
             "Response Y contains NaN or inf values. All values must be finite."
         )
-    if float(np.ptp(y_arr)) == 0.0:
+    low, high = float(y_arr.min()), float(y_arr.max())
+    if low == high:
         raise ValueError(
             "Response Y has zero variation; SPUR inference requires non-constant Y."
         )
-    y_dm = y_arr - float(np.mean(y_arr))
-    max_d = float(np.max(np.abs(y_dm)))
-    if not np.isfinite(max_d) or max_d == 0.0:
-        raise ValueError(
-            "Response Y is effectively constant; SPUR inference requires variation in Y."
-        )
-    return y_dm
+    anchor = 0.5 * low + 0.5 * high
+    return y_arr - anchor, anchor
+
+
+def demean_clusters(values: np.ndarray, groups: np.ndarray) -> np.ndarray:
+    """Subtract group means directly in scaled coordinates."""
+    shape = (int(groups.max()) + 1, values.shape[1])
+    low = np.full(shape, np.inf)
+    high = np.full(shape, -np.inf)
+    np.minimum.at(low, groups, values)
+    np.maximum.at(high, groups, values)
+    anchor = 0.5 * low + 0.5 * high
+    scale = np.maximum(high - anchor, anchor - low)
+    scale[scale == 0] = 1.0
+    scaled = (values - anchor[groups]) / scale[groups]
+    sums = np.zeros(shape)
+    np.add.at(sums, groups, scaled)
+    means = sums / np.bincount(groups)[:, None]
+    with np.errstate(over="ignore"):
+        transformed = (scaled - means[groups]) * scale[groups]
+    if not np.isfinite(transformed).all():
+        raise ValueError("Cluster demeaning produced a non-finite entry.")
+    return transformed
 
 
 def validate_and_project_y(y: np.ndarray, basis_r: np.ndarray) -> np.ndarray:
     """Validate response variation and project demeaned Y onto SPUR basis R."""
-    y_dm = validate_y_variation(y)
+    y_dm, _ = _offset_response(y)
     max_d = float(np.max(np.abs(y_dm)))
-    y_dm = y_dm / max_d
+    y_dm /= max_d
+    y_dm -= y_dm.mean()
     y_dm_norm = float(np.linalg.norm(y_dm))
     p_vec = basis_r.T @ y_dm
     p_max = float(np.max(np.abs(p_vec)))
@@ -186,45 +205,38 @@ def validate_and_project_y(y: np.ndarray, basis_r: np.ndarray) -> np.ndarray:
     return p_vec
 
 
-def validate_constant_span(design_basis: np.ndarray) -> None:
-    """Require the nuisance space used by the residual LBM approximation."""
+def residual_constant(design_basis: np.ndarray) -> np.ndarray | None:
+    """Check constant span and return its residual when larger than roundoff."""
     n = design_basis.shape[0]
     constant = np.full(n, 1.0 / np.sqrt(n))
     for _ in range(2):
         constant -= design_basis @ (design_basis.T @ constant)
     # Squared norm bounds the fraction of the constant covariance left by projection.
-    if float(constant @ constant) > np.finfo(float).eps:
+    eps = np.finfo(float).eps
+    norm_sq = float(constant @ constant)
+    if norm_sq > eps:
         raise ValueError("SPUR residual tests require a design that spans a constant.")
+    return None if norm_sq <= (8 * eps) ** 2 else constant * np.sqrt(n)
 
 
 def validate_and_project_residual_y(
     y: np.ndarray,
     basis_r: np.ndarray,
     design_basis: np.ndarray,
-    *,
-    center_response: bool,
+    constant_residual: np.ndarray | None,
 ) -> np.ndarray:
     """Residualize finite non-constant Y against Q_x and project onto SPUR basis R."""
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if y_arr.size == 0 or not np.all(np.isfinite(y_arr)):
-        raise ValueError(
-            "Response Y contains NaN or inf values. All values must be finite."
-        )
-    if np.all(y_arr == y_arr[0]):
-        raise ValueError(
-            "Response Y has zero variation; SPUR inference requires non-constant Y."
-        )
-
-    centered = y_arr
-    if center_response:
-        # An exact constant column allows subtraction before scaling.
-        with np.errstate(over="ignore"):
-            centered = y_arr - y_arr[0]
-        if not np.isfinite(centered).all():
-            scaled = y_arr / np.max(np.abs(y_arr))
-            centered = scaled - scaled[0]
-
-    col_scaled = centered / np.max(np.abs(centered))
+    centered, anchor = _offset_response(y)
+    scale = np.max(np.abs(centered))
+    allowance = 0.0
+    if constant_residual is None:
+        col_scaled = centered / scale
+    else:
+        # Form y - a * P_X 1 while retaining the correction a * M_X 1.
+        correction = anchor * constant_residual
+        scale = max(scale, np.max(np.abs(correction)))
+        col_scaled = centered / scale + correction / scale
+        allowance = (8 * np.finfo(float).eps * abs(anchor) / scale) * np.sqrt(len(y))
     col_norm = float(np.linalg.norm(col_scaled))
     u = col_scaled - design_basis @ (design_basis.T @ col_scaled)
     u = u - design_basis @ (design_basis.T @ u)
@@ -234,7 +246,7 @@ def validate_and_project_residual_y(
         not np.isfinite(u_max)
         or u_max == 0.0
         or not np.isfinite(u_norm)
-        or u_norm <= 1e-12 * col_norm
+        or u_norm <= 1e-12 * col_norm + allowance
     ):
         raise ValueError(
             "Residualized response Y has zero variation; SPUR inference requires variation orthogonal to X."

@@ -86,7 +86,7 @@ class HalfLifeResult:
         """Format results for display."""
         units = "fractions of max distance" if self.normdist else self.distance_units
         lines = [
-            f"Spatial half-life {self.level:g}% confidence set ({units})",
+            f"Approximate spatial half-life {self.level:g}% confidence set ({units})",
             "-" * 45,
         ]
         if self.components.size:

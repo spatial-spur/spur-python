@@ -41,6 +41,38 @@ def test_nearly_constant_design_preserves_residual_inference(backend):
 
 
 @pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_residual_inference_agrees_across_equivalent_large_offset_designs(backend):
+    rng = np.random.default_rng(86)
+    data = pd.DataFrame(
+        {
+            "s": rng.uniform(size=36),
+            "g": np.repeat(["a", "b", "c"], 12),
+            "y": 1e13 + 0.25 * rng.integers(-12, 13, size=36),
+        }
+    )
+    opts = dict(coords_euclidean=["s"], q=4, nrep=499, seed=42, backend=backend)
+    for test in (spur.spurtest_i0resid, spur.spurtest_i1resid):
+        baseline = test("y ~ C(g)", data, **opts)
+        all_indicators = test("y ~ 0 + C(g)", data, **opts)
+        assert all_indicators.LR == pytest.approx(baseline.LR, rel=1e-12)
+        assert all_indicators.pvalue == baseline.pvalue
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_i0_and_i1_calibrate_over_attainable_colocated_covariances(backend):
+    sites = np.array([0.0, 0.0, 0.04, 0.17, 0.19, 0.25, 0.42, 0.6, 0.78, 1.0])
+    data = pd.DataFrame({"s": sites, "y": np.sin(7 * sites)})
+    opts = dict(coords_euclidean=["s"], q=2, nrep=199, seed=17, backend=backend)
+    i0 = spur.spurtest_i0("y", data, **opts)
+    assert i0.rho_grid is not None
+    assert i0.rho_grid[0] == pytest.approx(1 / 45)
+    assert i0.rho_grid[-1] == 0.03
+    assert np.all(np.diff(i0.rho_grid) > 0)
+    assert np.isfinite(i0.LR)
+    assert np.isfinite(spur.spurtest_i1("y", data, **opts).LR)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
 def test_residual_dimension_and_units(backend):
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
@@ -206,7 +238,7 @@ def test_zero_projected_signal_is_rejected(backend):
         )
 
 
-@pytest.mark.parametrize("spur_api, spec", [(4, "0.3.7"), (5, "0.3.6")])
+@pytest.mark.parametrize("spur_api, spec", [(4, "0.3.8"), (5, "0.3.7")])
 def test_incompatible_spur_extension_uses_fallback(monkeypatch, spur_api, spec):
     from types import SimpleNamespace
     import importlib
@@ -230,7 +262,7 @@ def test_incompatible_spur_extension_uses_fallback(monkeypatch, spur_api, spec):
     )
     assert spur_core.load_rust_backend() is None
     if getattr(scpc_core, "RUST_API_VERSION", None) == 7:
-        assert scpc_core.load_rust_backend() is stale
+        assert scpc_core.load_rust_backend() is (stale if spur_api == 4 else None)
 
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])

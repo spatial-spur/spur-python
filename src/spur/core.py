@@ -36,50 +36,35 @@ from .utils.formula import (
 )
 from .utils.inference import (
     get_ha_param_i0,
-    get_ha_param_i1,
-    get_ha_param_i1_residual,
+    fit_spur_i1,
     monte_carlo_cutoffs,
+    precision_factor,
     spur_persistence,
 )
 from .utils.matrix import (
     cholesky_upper,
-    cluster_matrix,
+    demean_clusters,
     demean_matrix,
     get_r,
-    get_sigma_dm,
     get_sigma_lbm,
-    get_sigma_residual,
     iso_matrix,
     lbmgls_matrix,
     lbmgls_matrix_from_distances,
     nn_matrix,
     orthonormal_design_basis,
+    residual_constant,
     validate_and_project_residual_y,
     validate_and_project_y,
-    validate_constant_span,
-    validate_y_variation,
 )
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
 SPUR_RUST_API_VERSION = 5
-RUST_MIN_SPEC_VERSION = (0, 3, 7)
+RUST_MIN_SPEC_VERSION = (0, 3, 8)
 
 
 def _different_covariance_shapes(a: np.ndarray, b: np.ndarray) -> bool:
     return bool(np.max(np.abs(a / np.trace(a) - b / np.trace(b))) > 1e-12)
-
-
-def _validate_i1_shapes(
-    distmat: np.ndarray, omega: Callable[[float], np.ndarray]
-) -> None:
-    lo, mid, hi = (omega(get_cbar(rho, distmat)) for rho in (0.01, 0.5, 0.95))
-    if not _different_covariance_shapes(lo, mid) and not _different_covariance_shapes(
-        lo, hi
-    ):
-        raise ValueError(
-            "SPUR experiment is uninformative: covariance shapes are proportional."
-        )
 
 
 def resolve_backend(backend: object) -> str:
@@ -141,7 +126,7 @@ def _require_rust_if_requested(resolved_backend: str) -> Any | None:
         raise RuntimeError(
             "Rust backend requested, but a compatible `spatial_spur_rust` is unavailable. "
             f"Build the matching development adapter with SPUR API {SPUR_RUST_API_VERSION} "
-            f"and SCPC API {RUST_API_VERSION}, with methods spec 0.3.7 or newer."
+            f"and SCPC API {RUST_API_VERSION}, with methods spec 0.3.8 or newer."
         )
     return rust_mod
 
@@ -271,11 +256,6 @@ def _run_spur_test(
     x_in: np.ndarray | None = None,
 ) -> TestResult:
     _validate_test_dimensions(q, nrep, len(y), 0 if x_in is None else x_in.shape[1])
-    design_basis = None
-    if x_in is not None and (x_in.shape[1] == 0 or not np.all(x_in[:, 0] == 1.0)):
-        # Patsy places a formula intercept first. Check other designs before dispatch.
-        design_basis = orthonormal_design_basis(x_in)
-        validate_constant_span(design_basis)
     emat = _draw_emat(seed, 2 * q, nrep)
     rust_res = _try_rust_spur_test(
         test_type,
@@ -291,13 +271,9 @@ def _run_spur_test(
     )
     if rust_res is not None:
         return rust_res
-    if x_in is not None and design_basis is None:
-        design_basis = orthonormal_design_basis(x_in)
+    design_basis = None if x_in is None else orthonormal_design_basis(x_in)
     distmat = normalized_distmat(coords, latlon=latlong)
-    center_response = x_in is not None and bool(np.any(np.all(x_in == x_in[0], axis=0)))
-    basis = _prepare_fallback_spur_basis(
-        y, distmat, q, design_basis, center_response=center_response
-    )
+    basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
     return _fallback_spur_test(
         test_type,
         distmat,
@@ -310,11 +286,9 @@ def _run_spur_test(
 
 @dataclass(slots=True)
 class _FallbackSpurBasis:
-    r: np.ndarray
     response: np.ndarray
     brownian: np.ndarray
     omega: Callable[[float], np.ndarray]
-    projection: np.ndarray | None
 
 
 def _prepare_fallback_spur_basis(
@@ -322,42 +296,33 @@ def _prepare_fallback_spur_basis(
     distmat: np.ndarray,
     q: int,
     design_basis: np.ndarray | None,
-    *,
-    center_response: bool = False,
 ) -> _FallbackSpurBasis:
-    projection = (
-        None if design_basis is None else np.eye(len(y)) - design_basis @ design_basis.T
-    )
-    if projection is None:
+    if design_basis is None:
         sigma_bm = demean_matrix(get_sigma_lbm(distmat))
+        r = get_r(sigma_bm, q)
+        projected = r - r.mean(axis=0)
+        response = validate_and_project_y(y, r)
     else:
-        sigma_bm = projection @ (-0.5 * distmat) @ projection
-    r = get_r(sigma_bm, q)
-    response = (
-        validate_and_project_y(y, r)
-        if design_basis is None
-        else validate_and_project_residual_y(
-            y, r, design_basis, center_response=center_response
-        )
-    )
+        constant = residual_constant(design_basis)
+        sigma_bm = -0.5 * distmat
+        sigma_bm -= design_basis @ (design_basis.T @ sigma_bm)
+        sigma_bm -= (sigma_bm @ design_basis) @ design_basis.T
+        r = get_r(sigma_bm, q)
+        projected = r - design_basis @ (design_basis.T @ r)
+        response = validate_and_project_residual_y(y, r, design_basis, constant)
 
     def omega(c: float) -> np.ndarray:
         if np.isposinf(c):
-            kernel = (distmat == 0.0).astype(float)
-            sigma = (
-                demean_matrix(kernel)
-                if projection is None
-                else projection @ kernel @ projection
-            )
-            return r.T @ sigma @ r
-        sigma = (
-            get_sigma_dm(distmat, c)
-            if projection is None
-            else get_sigma_residual(distmat, c, projection)
-        )
-        return r.T @ sigma @ r
+            kernel = distmat == 0
+        elif c < 0.01:
+            kernel = np.expm1(-c * distmat)
+        else:
+            kernel = np.exp(-c * distmat)
+        covariance = projected.T @ (kernel @ projected)
+        return 0.5 * (covariance + covariance.T)
 
-    return _FallbackSpurBasis(r, response, r.T @ sigma_bm @ r, omega, projection)
+    brownian = r.T @ (sigma_bm @ r)
+    return _FallbackSpurBasis(response, 0.5 * (brownian + brownian.T), omega)
 
 
 def _fallback_spur_test(
@@ -383,7 +348,14 @@ def _fallback_spur_i0(
 ) -> TestResult:
     emat, tuning = np.split(emat, 2, axis=0)
     P = basis.response
-    om_rho = basis.omega(get_cbar(0.001, distmat))
+    floor = (np.count_nonzero(distmat == 0) - len(distmat)) / (
+        len(distmat) * (len(distmat) - 1)
+    )
+    if floor > 0.03:
+        raise ValueError(
+            "I(0) null requires a co-located-pair fraction at or below 0.03."
+        )
+    om_rho = basis.omega(get_cbar(0.001, distmat) if floor < 0.001 else np.inf)
     om_bm = basis.brownian
     if not _different_covariance_shapes(om_rho, om_bm):
         raise ValueError(
@@ -395,8 +367,8 @@ def _fallback_spur_i0(
     ha_parm = get_ha_param_i0(om_ho, om_i0, om_bm, tuning)
     om_ha = om_i0 + ha_parm * om_bm
 
-    ch_omi_ho = cholesky_upper(np.linalg.inv(om_ho))
-    ch_omi_ha = cholesky_upper(np.linalg.inv(om_ha))
+    ch_omi_ho = precision_factor(np.linalg.cholesky(om_ho))
+    ch_omi_ha = precision_factor(np.linalg.cholesky(om_ha))
 
     y_P_ho = ch_omi_ho @ P
     y_P_ha = ch_omi_ha @ P
@@ -404,11 +376,9 @@ def _fallback_spur_i0(
     q_P_ha = np.sum(y_P_ha**2)
     LR = float(q_P_ho / q_P_ha)
 
-    rho_min = 0.0001
-    rho_max = 0.03
-    n_rho = 30
-    floor = np.mean(distmat[np.tril_indices(len(distmat), -1)] == 0.0)
-    rho_grid = np.r_[floor, np.linspace(rho_min, rho_max, n_rho)]
+    first = 0.0001 if floor < 0.0001 else floor + (0.03 - floor) / 30
+    finite_rhos = np.linspace(first, 0.03, 30)
+    rho_grid = np.r_[floor, finite_rhos[finite_rhos > floor]]
     n_rho = rho_grid.size
 
     pvalue_vec = np.zeros(n_rho)
@@ -457,21 +427,12 @@ def _fallback_spur_i1(
     P = basis.response
     om_ho = basis.brownian
 
-    _validate_i1_shapes(distmat, basis.omega)
-    ha_parm = (
-        get_ha_param_i1(om_ho, distmat, basis.r, tuning)
-        if basis.projection is None
-        else get_ha_param_i1_residual(om_ho, distmat, basis.r, tuning, basis.projection)
-    )
-    om_ha = basis.omega(ha_parm)
+    ha_parm, om_ha = fit_spur_i1(om_ho, distmat, tuning, basis.omega)
+    ch_om_ho = np.linalg.cholesky(om_ho)
+    ch_omi_ho = precision_factor(ch_om_ho)
+    ch_omi_ha = precision_factor(np.linalg.cholesky(om_ha))
 
-    ch_om_ho = cholesky_upper(om_ho)
-    omi_ho = np.linalg.inv(om_ho)
-    omi_ha = np.linalg.inv(om_ha)
-    ch_omi_ho = cholesky_upper(omi_ho)
-    ch_omi_ha = cholesky_upper(omi_ha)
-
-    y_ho = ch_om_ho.T @ emat
+    y_ho = ch_om_ho @ emat
     y_ho_ho = ch_omi_ho @ y_ho
     y_ho_ha = ch_omi_ha @ y_ho
     q_ho_ho = np.sum(y_ho_ho**2, axis=0)
@@ -480,7 +441,7 @@ def _fallback_spur_i1(
 
     cv_vec = monte_carlo_cutoffs(lr_ho)
 
-    LR = float((P.T @ omi_ho @ P) / (P.T @ omi_ha @ P))
+    LR = float(np.sum((ch_omi_ho @ P) ** 2) / np.sum((ch_omi_ha @ P) ** 2))
     pvalue = float((1 + np.count_nonzero(lr_ho >= LR)) / (lr_ho.size + 1))
 
     return TestResult(
@@ -1032,7 +993,6 @@ def spurtransform(
     rust_mod = _require_rust_if_requested(resolved_backend)
 
     cluster_codes: np.ndarray | None = None
-    cluster: np.ndarray | None = None
     coords_raw: np.ndarray | None = None
     latlon = False
     if transformation == "cluster":
@@ -1042,10 +1002,8 @@ def spurtransform(
             raise ValueError(f"Cluster variable '{clustvar}' not found in DataFrame")
         if sample[clustvar].isna().any():
             raise ValueError(f"Cluster column '{clustvar}' contains missing values.")
-        cluster = sample[clustvar].to_numpy()
-        if rust_mod is not None:
-            codes, _ = pd.factorize(cluster, sort=False)
-            cluster_codes = np.ascontiguousarray(codes, dtype=np.int64)
+        codes, _ = pd.factorize(sample[clustvar], sort=False)
+        cluster_codes = np.ascontiguousarray(codes, dtype=np.int64)
     else:
         if n < 2:
             raise ValueError(
@@ -1093,9 +1051,8 @@ def spurtransform(
         )
         transformed = np.asarray(rust_res["transformed"], dtype=float)
     elif transformation == "cluster":
-        if cluster is None:
-            raise ValueError("clustvar must be specified for transformation='cluster'")
-        transformed = cluster_matrix(cluster) @ values
+        assert cluster_codes is not None
+        transformed = demean_clusters(values, cluster_codes)
     else:
         if coords_raw is None:
             raise ValueError("Coordinates must be resolved for spatial transformation.")
@@ -1140,8 +1097,9 @@ def spurhalflife(
     Invert spatial half-life tests by refining changes in acceptance.
 
     The half-life is the distance at which spatial correlation equals one half.
-    The result contains detected components and their hull. Narrow components
-    between search probes can escape detection.
+    The search adds probes at short half-lives based on the smallest positive
+    inter-site distance. The result contains detected components and their hull.
+    Narrow components or gaps between probes can escape detection.
 
     Parameters
     ----------
@@ -1203,7 +1161,6 @@ def spurhalflife(
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
 
-    Y = validate_y_variation(Y)
     emat = _draw_emat(seed, q, nrep)
 
     rust_mod = _require_rust_if_requested(resolved_backend)
@@ -1373,9 +1330,7 @@ def spur(
         if design_basis is None:
             design_basis = orthonormal_design_basis(x)
         levels_basis = _prepare_fallback_spur_basis(y, distmat, q, None)
-        residual_basis = _prepare_fallback_spur_basis(
-            y, distmat, q, design_basis, center_response=True
-        )
+        residual_basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
     levels_model = fitted.fit()
     fallback_reason = _fallback_reason(backend)
     stage_backends: dict[str, str] = {}

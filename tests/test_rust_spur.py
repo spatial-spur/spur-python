@@ -190,8 +190,9 @@ def test_spur_halflife_frozen_emat_parity_and_invariants(
             )
 
             assert ru.backend == "rust"
-            assert ru.pv_mat is not None and len(ru.pv_mat) == 129
-            assert ru.hl_grid is not None and len(ru.hl_grid) == 129
+            assert ru.pv_mat is not None and ru.hl_grid is not None
+            assert len(ru.pv_mat) == len(ru.hl_grid) >= 129
+            npt.assert_allclose(ru.hl_grid, fb.hl_grid, rtol=1e-12, atol=0)
             npt.assert_array_equal(ru.pv_mat, fb.pv_mat)
             npt.assert_allclose(ru.components, fb.components, rtol=1e-11, atol=1e-11)
             npt.assert_allclose(ru.max_dist, fb.max_dist, rtol=1e-12, atol=1e-12)

@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spur import load_chetty_data, standardize
+from spur import load_chetty_data, spurhalflife, standardize
+from spur.core import load_rust_backend
 from spur.utils.dist import get_distance_matrix
 from spur.utils.inference import spur_persistence
 from tests.utils import (
@@ -135,6 +136,44 @@ def test_half_life_continuous_inversion_against_three_site_reference(monkeypatch
         assert result.pv_mat[-1] < 0.05
 
 
+@pytest.mark.parametrize("backend", ["fallback", "rust"])
+def test_half_life_detects_a_short_disconnected_component(backend: str) -> None:
+    if backend == "rust" and load_rust_backend() is None:
+        pytest.skip("compatible native extension unavailable")
+    data = pd.DataFrame(
+        {
+            "s": [0.0, 2e-6, 2.845e-6, 0.2748, 0.5083, 0.5709, 0.646, 1.0],
+            "y": [
+                -0.780006,
+                -0.780004,
+                -0.780003,
+                -0.197270,
+                0.238765,
+                0.370591,
+                0.546977,
+                1.380950,
+            ],
+        }
+    )
+    result = spurhalflife(
+        "y",
+        data,
+        coords_euclidean=["s"],
+        q=3,
+        nrep=8000,
+        seed=2945,
+        normdist=True,
+        backend=backend,
+        nthreads=1,
+    )
+    assert result.hl_grid is not None and result.pv_mat is not None
+    old_first = np.searchsorted(result.hl_grid, 1 / 127)
+    assert result.pv_mat[0] < 0.05 and result.pv_mat[old_first] < 0.05
+    assert result.components.shape == (2, 2)
+    assert 0 < result.components[0, 0] < 6e-7 < result.components[0, 1] < 4e-6
+    assert result.components[1, 0] > 0.1 and np.isposinf(result.components[1, 1])
+
+
 def test_spur_persistence_high_q_avoids_overflow(monkeypatch) -> None:
     import spur
     import spur.core as spur_core
@@ -189,4 +228,5 @@ def test_spur_persistence_high_q_avoids_overflow(monkeypatch) -> None:
     else:
         assert ru.ci_upper == pytest.approx(fb.ci_upper, rel=1e-12, abs=1e-12)
     assert ru.pv_mat is not None
-    assert len(ru.pv_mat) == 129 and np.all(np.isfinite(ru.pv_mat))
+    assert ru.hl_grid is not None and len(ru.pv_mat) == len(ru.hl_grid) >= 129
+    assert np.all(np.isfinite(ru.pv_mat))
