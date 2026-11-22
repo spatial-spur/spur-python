@@ -96,7 +96,7 @@ def test_spurtransform_spatial_rejects_single_observation(
 
 
 @pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)
-@pytest.mark.parametrize("formula", ["y ~ 0 + x1", "y ~ x1"])
+@pytest.mark.parametrize("formula", ["y ~ 0 + C(group) + x1", "y ~ x1"])
 def test_residual_projection_is_invariant_to_nuisance_shifts(
     backend: str, formula: str
 ) -> None:
@@ -106,8 +106,10 @@ def test_residual_projection_is_invariant_to_nuisance_shifts(
     sy = np.sin(np.arange(n) * 0.4)
     x1 = 1.5 + rng.normal(size=n)
     y = (np.arange(n) ** 2 % 11).astype(float)
-    shift = 1e6 * x1 if formula == "y ~ 0 + x1" else 1e13
-    data = pd.DataFrame({"y": y, "x1": x1, "sx": sx, "sy": sy})
+    shift = 1e6 * x1 if "C(group)" in formula else 1e13
+    data = pd.DataFrame(
+        {"y": y, "x1": x1, "sx": sx, "sy": sy, "group": np.arange(n) % 2}
+    )
     shifted = data.assign(y=y + shift)
     opts: dict[str, Any] = dict(
         coords_euclidean=("sx", "sy"), q=8, nrep=1000, seed=17, backend=backend
@@ -117,6 +119,15 @@ def test_residual_projection_is_invariant_to_nuisance_shifts(
         result = fn(formula, shifted, **opts)
         np.testing.assert_allclose(base.LR, result.LR, rtol=1e-8, atol=1e-8)
         np.testing.assert_allclose(base.pvalue, result.pvalue, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)
+def test_residual_tests_require_the_constant_direction(backend: str) -> None:
+    s = np.linspace(0, 1, 60)
+    data = pd.DataFrame({"y": np.sin(13 * s), "x": s - 0.5, "s": s})
+    for fn in (spurtest_i0resid, spurtest_i1resid):
+        with pytest.raises(ValueError, match="design that spans a constant"):
+            fn("y ~ 0 + x", data, coords_euclidean=["s"], backend=backend)
 
 
 @pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)

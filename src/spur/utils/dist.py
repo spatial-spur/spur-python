@@ -3,6 +3,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike
+from scpc.utils.spatial import get_c0_from_avc
 
 
 EARTH_RADIUS_M = 6_371_000.009
@@ -210,42 +211,41 @@ def get_cbar(rhobar: float, distmat: np.ndarray) -> float:
         c value
     """
     vd = lvech(distmat)
+    if vd.size == 0 or not np.isfinite(vd).all() or np.any(vd < 0.0):
+        raise ValueError("Pairwise distances must be present, finite and nonnegative.")
+    floor = float(np.mean(vd == 0.0))
+    if not floor < rhobar < 1.0:
+        raise ValueError(
+            "Target correlation must exceed the co-located-pair fraction and be below one."
+        )
 
     c0 = 10.0
     c1 = 10.0
 
-    i1 = False
-    jj = 0
-    while not i1:
-        v = np.mean(np.exp(-c0 * vd))
-        i1 = v > rhobar
-        if not i1:
-            c1 = c0
-            c0 = c0 / 2
-            jj += 1
-        if jj > 500:
-            raise ValueError("rhobar too large")
+    for _ in range(500):
+        if float(np.mean(np.exp(-c0 * vd))) > rhobar:
+            break
+        c1 = c0
+        c0 *= 0.5
+    else:
+        raise ValueError("SPUR decay calibration could not bracket the target.")
 
-    i1 = False
-    jj = 0
-    while not i1:
-        v = np.mean(np.exp(-c1 * vd))
-        i1 = v < rhobar
-        if not i1:
-            c0 = c1
-            c1 = 2 * c1
-            jj += 1
-        if c1 > 10000:
-            i1 = True
-        if jj > 500:
-            raise ValueError("rhobar too small")
+    while True:
+        corr = float(np.mean(np.exp(-c1 * vd)))
+        if corr < rhobar:
+            break
+        # Keep the historical bisection when its final trial brackets the root.
+        if c1 > 10_000.0:
+            return c1 if corr == rhobar else get_c0_from_avc(vd, rhobar)
+        c0 = c1
+        c1 *= 2.0
 
     while (c1 - c0) > 0.001:
-        cm = np.sqrt(c0 * c1)
+        cm = float(np.sqrt(c0 * c1))
         v = np.mean(np.exp(-cm * vd))
         if v < rhobar:
             c1 = cm
         else:
             c0 = cm
 
-    return np.sqrt(c0 * c1)
+    return float(np.sqrt(c0 * c1))

@@ -330,6 +330,8 @@ def render_pipeline_summary(result: PipelineResult) -> str:
             rule=rule,
         )
     )
-    lines.extend([rule, rule])
+    lines.extend(
+        [rule, rule, "", "The transformed intercept reflects LBM-GLS centering."]
+    )
 
     return "\n".join(lines)

@@ -339,7 +339,7 @@ def spur_persistence(
     Y: np.ndarray, distmat: np.ndarray, emat: np.ndarray, level: float
 ) -> tuple:
     """
-    Compute confidence interval for half-life parameter.
+    Report the smallest and largest accepted points on the half-life grid.
 
     Parameters
     ----------

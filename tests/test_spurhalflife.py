@@ -84,7 +84,14 @@ def test_spurhalflife_validates_level_and_summary(chetty_df: pd.DataFrame) -> No
 
     assert isinstance(result, HalfLifeResult)
     assert result.ci_lower >= 0 or np.isnan(result.ci_lower)
-    assert "Spatial half-life" in result.summary()
+    assert "replication grid bounds" in result.summary()
+
+
+def test_half_life_summary_explains_the_infinite_grid_marker() -> None:
+    result = HalfLifeResult(0.001, np.inf, 2.0, 95, True)
+    assert "Upper bound: inf (grid point at 100 sample diameters accepted)" in (
+        result.summary()
+    )
 
 
 def test_spurhalflife_rejects_more_invalid_parameters() -> None:

@@ -21,6 +21,19 @@ def _load_bench_df() -> pd.DataFrame:
     return pd.read_csv(BENCH_200)
 
 
+def test_symmetric_residual_basis_agrees_with_common_draws() -> None:
+    s = np.linspace(0.0, 1.0, 60)
+    data = pd.DataFrame({"s": s, "x": s - 0.5, "y": np.sin(13 * s)})
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["s"], q=15, nrep=10_000, seed=42, nthreads=1
+    )
+    fallback = spur.spurtest_i1resid("y ~ x", data, backend="fallback", **opts)
+    native = spur.spurtest_i1resid("y ~ x", data, backend="rust", **opts)
+    assert not native.tied
+    npt.assert_allclose(native.cv, fallback.cv, rtol=1e-9)
+    assert native.pvalue == fallback.pvalue
+
+
 def test_spur_diagnostics_frozen_emat_parity_geodesic_and_euclidean(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -90,6 +90,8 @@ SCPC q                      8              8
 SCPC cv                2.6097         2.6097
 SCPC avc               0.0300         0.0300
 --------------------------------------------
+
+The transformed intercept reflects LBM-GLS centering.
 ```
 
 ## Documentation
@@ -105,18 +107,24 @@ Chetty, Raj, Nathaniel Hendren, Patrick Kline, Emmanuel Saez "Where is the land 
 Müller, Ulrich K. and Mark W. Watson "Spatial Unit Roots and Spurious Regression", Econometrica 92(5) (2024), 1661–1695. doi:10.3982/ECTA21654.
 
 SPUR inference requires at least two retained directions (`q >= 2`). Residual
-tests also require `q` not to exceed the residual degrees of freedom and the
-retained covariance to have positive rank. Experiments with no projected outcome
-variation or no covariance-shape information raise `ValueError`. Eigenvector
-signs are normalized consistently across backends, so seeded Monte Carlo results
-are reproducible across the native and fallback implementations. This sign
-convention can change the finite simulation result from earlier releases.
-Half-life distances use metres for geographic coordinates and the supplied
-coordinate units for Euclidean coordinates.
+tests also require the evaluated design to span a constant, `q` to fit within
+the residual degrees of freedom, and the retained covariance to have positive
+rank. Experiments with no projected outcome variation or no covariance-shape
+information raise `ValueError`. The backends use the same convention for
+orienting eigenvectors before applying seeded draws. Nearly tied eigenvalues
+or loadings can affect Monte Carlo reproducibility across backends.
+
+`spurhalflife()` returns the smallest and largest accepted points on the
+Müller–Watson replication grid. The grid is expressed in fractions of the
+sample diameter and its last two points are 3 and 100. An upper bound of
+`inf` follows the replication convention when the point at 100 is accepted.
+Inference applies to the evaluated grid points. Distance units are metres for
+geographic coordinates and the supplied units for Euclidean coordinates.
 Use `backend="auto"` (the default), `"rust"`, or `"fallback"` to select
 execution. `SPATIAL_BACKEND` applies when you omit the argument.
-Set `nthreads=1` for single-threaded Rust execution. For process-based
-parallelism after native threads have been used, start workers with
+Set `nthreads=1` for a single Rust worker. Linear algebra providers manage
+their own internal threading. For process-based parallelism after native
+threads have been used, start workers with
 `spawn` or `forkserver`.
 
 `spur()` evaluates the formula once and runs all diagnostics and both fits on
@@ -127,15 +135,22 @@ in `fallback_reasons`. With `backend="auto"`, a native eigenspace tie reruns
 all four diagnostics and the transformation together in Python using the same
 simulation draws. Each SCPC fit selects its own backend.
 
-Use `y ~ C(region)` with an intercept. A full set of
-category indicators in `y ~ 0 + C(region)` spans a constant, which LBM-GLS
-removes and leaves the transformed coefficients unidentified.
+The combined workflow requires a formula intercept, as in `y ~ C(region)`.
+Standalone residual tests also accept a full set of indicators, as in
+`y ~ 0 + C(region)`, because those columns span a constant. The transformed
+fit in `spur()` uses centered transformed variables, so its intercept reflects
+that centering.
 
 The residual tests and `spurtransform()` accept evaluated terms such as
 `np.log(y) ~ x * C(region)`. `spurtransform()` names the appended columns using
 the prefix and evaluated column names. Rows excluded by the formula have missing
 values in those columns. `spurhalflife()` also reports `fallback_reason` when
 automatic dispatch uses the Python implementation.
+
+For manual IV estimation after applying a SPUR transformation, justify
+instrument exclusion and first-stage relevance for the transformed moments.
+Differencing combines observations across locations, so exclusion at each
+original location alone is insufficient. See [Becker, Boll and Voth, §4.1](https://www.sobecker.de/SPUR_Stata_Journal_website.pdf#page=16).
 
 This development branch requires the matching `scpc-python` checkout at version
 `0.1.3.dev0` or newer. Place it alongside `spur-python` before running

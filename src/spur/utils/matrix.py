@@ -76,7 +76,7 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
         col = R[:, j]
         magnitude = np.abs(col)
         maximum = np.max(magnitude)
-        tie_tolerance = 64 * np.finfo(float).eps * maximum
+        tie_tolerance = 1e-12 * maximum
         first = np.flatnonzero(maximum - magnitude <= tie_tolerance)[0]
         if col[first] < 0.0:
             col *= -1.0
@@ -181,6 +181,16 @@ def validate_and_project_y(y: np.ndarray, basis_r: np.ndarray) -> np.ndarray:
     return p_vec
 
 
+def validate_constant_span(design_basis: np.ndarray) -> None:
+    """Require the nuisance space used by the residual LBM approximation."""
+    n = design_basis.shape[0]
+    constant = np.full(n, 1.0 / np.sqrt(n))
+    for _ in range(2):
+        constant -= design_basis @ (design_basis.T @ constant)
+    if np.linalg.norm(constant) > 64 * np.finfo(float).eps:
+        raise ValueError("SPUR residual tests require a design that spans a constant.")
+
+
 def validate_and_project_residual_y(
     y: np.ndarray, basis_r: np.ndarray, design_basis: np.ndarray
 ) -> np.ndarray:
@@ -195,20 +205,15 @@ def validate_and_project_residual_y(
             "Response Y has zero variation; SPUR inference requires non-constant Y."
         )
 
-    # A constant in the nuisance span can be removed exactly before scaling.
+    # The nuisance space spans a constant, so remove it before scaling.
     # Scaling first could otherwise erase useful variation near a large offset.
-    constant = np.full(y_arr.size, 1.0 / np.sqrt(y_arr.size))
-    for _ in range(2):
-        constant -= design_basis @ (design_basis.T @ constant)
-    if np.linalg.norm(constant) <= 64 * np.finfo(float).eps:
-        with np.errstate(over="ignore"):
-            centered = y_arr - y_arr[0]
-        if not np.isfinite(centered).all():
-            scaled = y_arr / np.max(np.abs(y_arr))
-            centered = scaled - scaled[0]
-        y_arr = centered
+    with np.errstate(over="ignore"):
+        centered = y_arr - y_arr[0]
+    if not np.isfinite(centered).all():
+        scaled = y_arr / np.max(np.abs(y_arr))
+        centered = scaled - scaled[0]
 
-    col_scaled = y_arr / np.max(np.abs(y_arr))
+    col_scaled = centered / np.max(np.abs(centered))
     col_norm = float(np.linalg.norm(col_scaled))
     u = col_scaled - design_basis @ (design_basis.T @ col_scaled)
     u = u - design_basis @ (design_basis.T @ u)

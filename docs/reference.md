@@ -13,7 +13,7 @@ This page documents the public `spur-python` API.
 | `spurtest_i0resid()` | Residual-based `I(0)` test for a regression formula |
 | `spurtest_i1resid()` | Residual-based `I(1)` test for a regression formula |
 | `spurtransform()` | Transform all variables referenced in a formula |
-| `spurhalflife()` | Estimate a spatial half-life confidence interval |
+| `spurhalflife()` | Report accepted spatial half-life grid bounds |
 | `load_chetty_data()` | Load the packaged Chetty dataset |
 | `standardize()` | Standardize selected columns in a DataFrame |
 
@@ -30,10 +30,9 @@ Do not pass both specifications in the same call.
 
 ### Simulation Controls
 
-The SPUR tests and half-life interval are simulation-based.
+The SPUR tests and half-life calculations are simulation-based.
 
-- `q`: number of low-frequency weights used in the statistic; must satisfy
-  `1 <= q < n`
+- `q`: number of low-frequency weights used in the statistic. Use `2 <= q < n`
 - `nrep`: number of Monte Carlo draws used to simulate the reference
   distribution
 - `seed`: random seed used for reproducibility
@@ -44,6 +43,9 @@ The SPUR tests and half-life interval are simulation-based.
   or a one-variable formula such as `"am ~ 1"`
 - Residual diagnostics, transformation, and the full pipeline accept a
   two-sided formula such as `"am ~ gini + fracblack"`
+- The full pipeline requires a formula intercept. Standalone residual tests
+  require the evaluated design to span a constant. A full set of group
+  indicators can supply that direction.
 
 ## Full Workflow
 
@@ -72,9 +74,9 @@ spur(
 
 **Parameters**
 
-- `formula` (`str`): two-sided regression formula. The left-hand side is the
-  dependent variable. The right-hand side defines the regressors used in both
-  the levels and transformed branches.
+- `formula` (`str`): two-sided regression formula with an intercept. The
+  left-hand side is the dependent variable. The right-hand side defines the
+  regressors used in both the levels and transformed branches.
 - `data` (`pandas.DataFrame`): input data containing the variables referenced in
   `formula` and the coordinate columns.
 - `lon`, `lat` (`str | None`): longitude and latitude column names for
@@ -312,7 +314,10 @@ spurtransform(
 
 ### `spurhalflife()`
 
-Estimate a confidence interval for the spatial half-life of a variable.
+Report the smallest and largest accepted values on the Müller–Watson spatial
+half-life replication grid. The last two null grid points are 3 and 100 sample
+diameters. The historical value `ci_upper = inf` means that the null at 100
+diameters was accepted. The search evaluates only the specified grid points.
 
 **Signature**
 
@@ -339,8 +344,8 @@ spurhalflife(
   columns.
 - `lon`, `lat`, `coords_euclidean`, `q`, `nrep`, `seed`: as above.
 - `level` (`float`): confidence level in percent.
-- `normdist` (`bool`): if `True`, report the interval as a fraction of the
-  maximum pairwise distance; otherwise report it in distance units.
+- `normdist` (`bool`): if `True`, report the bounds as fractions of the
+  maximum pairwise distance. Otherwise the bounds use distance units.
 
 **Returns**
 

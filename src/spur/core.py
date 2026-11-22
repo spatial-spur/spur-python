@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 import importlib
 from dataclasses import dataclass
-import math
 import os
 from typing import Any, Literal, Optional
 
@@ -56,6 +55,7 @@ from .utils.matrix import (
     orthonormal_design_basis,
     validate_and_project_residual_y,
     validate_and_project_y,
+    validate_constant_span,
     validate_y_variation,
 )
 
@@ -264,6 +264,11 @@ def _run_spur_test(
     x_in: np.ndarray | None = None,
 ) -> TestResult:
     _validate_test_dimensions(q, nrep, len(y), 0 if x_in is None else x_in.shape[1])
+    design_basis = None
+    if x_in is not None and (x_in.shape[1] == 0 or not np.all(x_in[:, 0] == 1.0)):
+        # Patsy places a formula intercept first. Check other designs before dispatch.
+        design_basis = orthonormal_design_basis(x_in)
+        validate_constant_span(design_basis)
     emat = _draw_emat(seed, q, nrep)
     rust_res, tied = _try_rust_spur_test(
         test_type,
@@ -279,7 +284,8 @@ def _run_spur_test(
     )
     if rust_res is not None:
         return rust_res
-    design_basis = None if x_in is None else orthonormal_design_basis(x_in)
+    if x_in is not None and design_basis is None:
+        design_basis = orthonormal_design_basis(x_in)
     distmat = normalized_distmat(coords, latlon=latlong)
     basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
     return _fallback_spur_test(
@@ -310,11 +316,13 @@ def _prepare_fallback_spur_basis(
     projection = (
         None if design_basis is None else np.eye(len(y)) - design_basis @ design_basis.T
     )
-    sigma_bm = (
-        demean_matrix(get_sigma_lbm(distmat))
-        if projection is None
-        else get_sigma_residual(distmat, get_cbar(0.999, distmat), projection)
-    )
+    if projection is None:
+        sigma_bm = demean_matrix(get_sigma_lbm(distmat))
+    else:
+        # Projection removes the all-ones part of the near-unit-root kernel.
+        # Removing it before multiplication improves the accuracy of the basis.
+        c_bm = get_cbar(0.999, distmat)
+        sigma_bm = projection @ np.expm1(-c_bm * distmat) @ projection
     r = get_r(sigma_bm, q)
     response = (
         validate_and_project_y(y, r)
@@ -683,7 +691,8 @@ def spurtest_i1resid(
 
     Use this function when you want to test the residual dependence implied by a
     formula such as `y ~ x1 + x2`. Provide either longitude/latitude columns or
-    Euclidean coordinate columns.
+    Euclidean coordinate columns. The evaluated design must span a constant,
+    for example through an intercept or a full set of group indicators.
 
     Args:
         formula: Two-sided regression formula identifying the dependent variable
@@ -755,7 +764,8 @@ def spurtest_i0resid(
 
     Use this function when you want to test the residual dependence implied by a
     formula such as `y ~ x1 + x2`. Provide either longitude/latitude columns or
-    Euclidean coordinate columns.
+    Euclidean coordinate columns. The evaluated design must span a constant,
+    for example through an intercept or a full set of group indicators.
 
     Args:
         formula: Two-sided regression formula identifying the dependent variable
@@ -1104,9 +1114,13 @@ def spurhalflife(
     nthreads: int | None = None,
 ) -> HalfLifeResult:
     """
-    Compute confidence interval for spatial half-life.
+    Report the smallest and largest accepted spatial half-life grid points.
 
     The half-life is the distance at which spatial correlation = 1/2.
+    This uses the Müller–Watson replication grid, in fractions of the sample
+    diameter. Its largest tested points are 3 and 100. The historical upper
+    bound `inf` indicates acceptance at 100 diameters. Intermediate values
+    between 3 and 100 and the infinite half-life limit are untested.
 
     Parameters
     ----------
@@ -1260,7 +1274,7 @@ def spur(
     """Run the full SPUR pipeline and return all major outputs.
 
     Args:
-        formula: Two-sided regression formula for the model of interest.
+        formula: Two-sided regression formula with an intercept.
         data: DataFrame containing the model variables and coordinate columns.
         lon: Name of the longitude column. Use together with `lat`.
         lat: Name of the latitude column. Use together with `lon`.
@@ -1316,20 +1330,9 @@ def spur(
         raise ValueError("The evaluated regression design and response must be finite.")
     design_names = fitted.exog_names
     intercept_slice = intercept_columns(fitted.data)
-    intercept = intercept_slice is not None
-    design_basis = None
-    if not intercept or rust_mod is None:
-        design_basis = orthonormal_design_basis(x)
-    if not intercept:
-        assert design_basis is not None
-        constant = np.ones(len(sample))
-        if np.linalg.norm(constant - design_basis @ (design_basis.T @ constant)) <= (
-            1e-10 * math.sqrt(len(sample))
-        ):
-            raise ValueError(
-                "The intercept-free design spans a constant, so the transformed "
-                "regression would be rank-deficient. Use an explicit intercept."
-            )
+    if intercept_slice is None:
+        raise ValueError("spur() requires a formula with an intercept.")
+    design_basis = orthonormal_design_basis(x) if rust_mod is None else None
     _validate_test_dimensions(q, nrep, len(sample), x.shape[1])
 
     coord_info = resolve_spur_coords(
@@ -1343,8 +1346,7 @@ def spur(
     emat = _draw_emat(seed, q, nrep)
 
     transform_idx = list(range(x.shape[1]))
-    if intercept_slice is not None:
-        del transform_idx[intercept_slice]
+    del transform_idx[intercept_slice]
     transform_input = np.column_stack((y, x[:, transform_idx]))
     test_types = ("i0", "i1", "i0resid", "i1resid")
 
@@ -1423,8 +1425,6 @@ def spur(
         transformed_columns.append(column)
         transformed_terms.append(column if column.isidentifier() else f"Q({column!r})")
     rhs = transformed_terms[1:] or ["1"]
-    if not intercept:
-        rhs = ["0", *transformed_terms[1:]]
     transformed_formula = f"{transformed_terms[0]} ~ {' + '.join(rhs)}"
     # Formula evaluation needs only the new variables. In particular a column
     # named Q in the input must not shadow Patsy's quoting helper.

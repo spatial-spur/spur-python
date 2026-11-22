@@ -221,18 +221,18 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
     assert not result.tests.i0.tied and result.tests.i0resid.tied
 
 
-def test_pipeline_preserves_literal_intercept():
+def test_pipeline_requires_an_intercept_term():
     rng = np.random.default_rng(95)
     df = pd.DataFrame(rng.normal(size=(20, 3)), columns=["y", "Intercept", "sx"])
-    result = spur(
-        "y ~ 0 + Intercept",
-        df,
-        coords_euclidean=["sx"],
-        q=8,
-        nrep=512,
-        backend="fallback",
-    )
-    assert result.fits.transformed.model.model.exog_names == ["h_Intercept"]
+    with pytest.raises(ValueError, match="requires a formula with an intercept"):
+        spur(
+            "y ~ 0 + Intercept",
+            df,
+            coords_euclidean=["sx"],
+            q=8,
+            nrep=512,
+            backend="fallback",
+        )
 
 
 @pytest.mark.parametrize("test_type", ["i0resid", "i1resid"])
@@ -266,7 +266,7 @@ def test_residual_formula_uses_callers_namespace(monkeypatch, test_type, wrapper
     ("formula", "response", "message"),
     [
         ("y ~ x", [1.0, 2.0, 3.0, np.inf], "must be finite"),
-        ("y ~ 0 + C(g)", [1.0, 2.0, 3.0, 4.0], "spans a constant"),
+        ("y ~ 0 + C(g)", [1.0, 2.0, 3.0, 4.0], "requires a formula with an intercept"),
     ],
 )
 def test_spur_validates_design_before_ols_fit(monkeypatch, formula, response, message):
@@ -357,8 +357,8 @@ def test_pipeline_result_summary_formats_comparison_table() -> None:
     assert lines[regression_title_index - 3] == lines[0]
     assert lines[regression_title_index + 1] == lines[0]
     assert lines[regression_title_index + 2] == lines[0]
-    assert lines[-2] == lines[-1]
-    assert set(lines[-1]) == {"-"}
+    assert lines[-4] == lines[-3] == lines[0]
+    assert "The transformed intercept reflects LBM-GLS centering." in text
     assert "SPUR Pipeline Results" not in text
     assert "mobility" in text
     assert "SPUR Diagnostics" in text

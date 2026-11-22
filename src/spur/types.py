@@ -52,12 +52,12 @@ class TestResult:
 
 @dataclass
 class HalfLifeResult:
-    """Spatial half-life interval result."""
+    """Smallest and largest accepted points on the spatial half-life grid."""
 
     ci_lower: float
-    """Lower end of the reported interval."""
+    """Smallest accepted grid point."""
     ci_upper: float
-    """Upper end of the reported interval."""
+    """Largest accepted grid point, with infinity indicating acceptance at 100 diameters."""
     max_dist: float
     """Largest observed distance in the sample."""
     level: float
@@ -81,11 +81,14 @@ class HalfLifeResult:
     def summary(self) -> str:
         """Format results for display."""
         units = "fractions of max distance" if self.normdist else self.distance_units
+        upper = f"{self.ci_upper:.6g}"
+        if np.isposinf(self.ci_upper):
+            upper += " (grid point at 100 sample diameters accepted)"
         lines = [
-            f"Spatial half-life {self.level:g}% confidence interval ({units})",
+            f"Spatial half-life {self.level:g}% replication grid bounds ({units})",
             "-" * 45,
             f"Lower bound: {self.ci_lower:.6g}",
-            f"Upper bound: {self.ci_upper:.6g}",
+            f"Upper bound: {upper}",
             f"Max distance in sample: {self.max_dist:.6g} {self.distance_units}",
             "-" * 45,
         ]
