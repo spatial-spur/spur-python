@@ -319,10 +319,8 @@ def _prepare_fallback_spur_basis(
     if projection is None:
         sigma_bm = demean_matrix(get_sigma_lbm(distmat))
     else:
-        # Projection removes the all-ones part of the near-unit-root kernel.
-        # Removing it before multiplication improves the accuracy of the basis.
         c_bm = get_cbar(0.999, distmat)
-        sigma_bm = projection @ np.expm1(-c_bm * distmat) @ projection
+        sigma_bm = get_sigma_residual(distmat, c_bm, projection)
     r = get_r(sigma_bm, q)
     response = (
         validate_and_project_y(y, r)

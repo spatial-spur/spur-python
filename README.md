@@ -114,6 +114,9 @@ information raise `ValueError`. The backends use the same convention for
 orienting eigenvectors before applying seeded draws. Nearly tied eigenvalues
 or loadings can affect Monte Carlo reproducibility across backends.
 
+The fixed I(0) calibration grid requires fewer than `0.0001` of the observation
+pairs to share a location. This also applies to the I(0) diagnostics in `spur()`.
+
 `spurhalflife()` returns the smallest and largest accepted points on the
 Müller–Watson replication grid. The grid is expressed in fractions of the
 sample diameter and its last two points are 3 and 100. An upper bound of

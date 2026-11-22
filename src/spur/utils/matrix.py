@@ -187,7 +187,8 @@ def validate_constant_span(design_basis: np.ndarray) -> None:
     constant = np.full(n, 1.0 / np.sqrt(n))
     for _ in range(2):
         constant -= design_basis @ (design_basis.T @ constant)
-    if np.linalg.norm(constant) > 64 * np.finfo(float).eps:
+    # Squared norm bounds the fraction of the constant covariance left by projection.
+    if float(constant @ constant) > np.finfo(float).eps:
         raise ValueError("SPUR residual tests require a design that spans a constant.")
 
 
@@ -283,8 +284,7 @@ def get_sigma_dm(distmat: np.ndarray, c: float) -> np.ndarray:
 
     sigma(i,j) = exp(-c * distmat(i,j)), then double-demean.
     """
-    sigma = np.exp(-c * distmat)
-    return demean_matrix(sigma)
+    return demean_matrix(np.expm1(-c * distmat))
 
 
 def get_sigma_residual(distmat: np.ndarray, c: float, M: np.ndarray) -> np.ndarray:
@@ -294,8 +294,10 @@ def get_sigma_residual(distmat: np.ndarray, c: float, M: np.ndarray) -> np.ndarr
     Used for I(1) and I(0) residual tests. The projection matrix M already
     accounts for the regressors, so we project the spatial covariance.
     """
-    sigma = np.exp(-c * distmat)
-    return M @ sigma @ M.T
+    # Project the exponential deviation without first subtracting order-one
+    # matrices. Restore the constant term for general projection matrices.
+    constant = M.sum(axis=1)
+    return M @ np.expm1(-c * distmat) @ M.T + np.outer(constant, constant)
 
 
 def nn_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
