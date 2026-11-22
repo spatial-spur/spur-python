@@ -137,9 +137,13 @@ the prefix and evaluated column names. Rows excluded by the formula have missing
 values in those columns. `spurhalflife()` also reports `fallback_reason` when
 automatic dispatch uses the Python implementation.
 
-The Rust backend in this development branch requires SPUR API 3 and SCPC API 7. Install the native adapter from the matching shared-core checkout. The full pipeline
-also needs the matching development checkout of SCPC for native execution.
+This development branch requires the matching `scpc-python` checkout at version
+`0.1.3.dev0` or newer. Place it alongside `spur-python` before running
+`uv sync --locked` from `spur-python`. This setup supports the pure-Python backend.
+
+For Rust, install the native adapter from the matching sibling `spatial-rust`
+checkout. The adapter must provide SPUR API 4 and SCPC API 7.
 
 ```bash
-uv pip install ../spatial-rust/crates/spatial-py -e ../scpc-python
+uv pip install ../spatial-rust/crates/spatial-py
 ```

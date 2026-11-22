@@ -1,6 +1,10 @@
-from typing import Optional
 import numpy as np
-from .dist import EARTH_CIRCUMFERENCE_M, get_distance_matrix, great_circle_fraction_matrix
+from .dist import (
+    EARTH_CIRCUMFERENCE_M,
+    get_distance_matrix,
+    great_circle_fraction_matrix,
+    normalized_distmat,
+)
 
 
 def demean_matrix(mat: np.ndarray) -> np.ndarray:
@@ -186,18 +190,36 @@ def validate_and_project_residual_y(
         raise ValueError(
             "Response Y contains NaN or inf values. All values must be finite."
         )
-    raw_max = float(np.max(np.abs(y_arr)))
-    if float(np.ptp(y_arr)) == 0.0 or not np.isfinite(raw_max) or raw_max == 0.0:
+    if np.all(y_arr == y_arr[0]):
         raise ValueError(
             "Response Y has zero variation; SPUR inference requires non-constant Y."
         )
-    col_scaled = y_arr / raw_max
+
+    # A constant in the nuisance span can be removed exactly before scaling.
+    # Scaling first could otherwise erase useful variation near a large offset.
+    constant = np.full(y_arr.size, 1.0 / np.sqrt(y_arr.size))
+    for _ in range(2):
+        constant -= design_basis @ (design_basis.T @ constant)
+    if np.linalg.norm(constant) <= 64 * np.finfo(float).eps:
+        with np.errstate(over="ignore"):
+            centered = y_arr - y_arr[0]
+        if not np.isfinite(centered).all():
+            scaled = y_arr / np.max(np.abs(y_arr))
+            centered = scaled - scaled[0]
+        y_arr = centered
+
+    col_scaled = y_arr / np.max(np.abs(y_arr))
     col_norm = float(np.linalg.norm(col_scaled))
     u = col_scaled - design_basis @ (design_basis.T @ col_scaled)
     u = u - design_basis @ (design_basis.T @ u)
     u_max = float(np.max(np.abs(u)))
     u_norm = float(np.linalg.norm(u))
-    if not np.isfinite(u_max) or u_max == 0.0 or not np.isfinite(u_norm) or u_norm <= 1e-12 * col_norm:
+    if (
+        not np.isfinite(u_max)
+        or u_max == 0.0
+        or not np.isfinite(u_norm)
+        or u_norm <= 1e-12 * col_norm
+    ):
         raise ValueError(
             "Residualized response Y has zero variation; SPUR inference requires variation orthogonal to X."
         )
@@ -343,7 +365,9 @@ def iso_matrix(coords: np.ndarray, radius: float, latlon: bool = True) -> np.nda
     n = coords.shape[0]
     if latlon:
         fraction = great_circle_fraction_matrix(coords)
-        neighbors = (fraction <= float(radius) / EARTH_CIRCUMFERENCE_M) & (fraction > 0.0)
+        neighbors = (fraction <= float(radius) / EARTH_CIRCUMFERENCE_M) & (
+            fraction > 0.0
+        )
     else:
         distmat = get_distance_matrix(coords, latlon=False)
         neighbors = (distmat <= radius) & (distmat > 0.0)
@@ -385,17 +409,12 @@ def lbmgls_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     4. Eigendecomposition
     5. GLS transform: V @ diag(1/sqrt(eigenvalues)) @ V'
     """
+    return lbmgls_matrix_from_distances(normalized_distmat(coords, latlon=latlon))
+
+
+def lbmgls_matrix_from_distances(distmat: np.ndarray) -> np.ndarray:
+    """Build LBM-GLS weights from an already normalized distance matrix."""
     small = 1e-10
-
-    distmat = get_distance_matrix(coords, latlon=latlon)
-    max_dist = float(distmat.max())
-    if not np.isfinite(max_dist) or max_dist <= 0.0:
-        raise ValueError(
-            "All coordinates are identical — LBM-GLS normalization "
-            "requires distinct locations."
-        )
-    distmat = distmat / max_dist
-
     sigma_lbm = get_sigma_lbm(distmat)
     sigma_lbm_dm = demean_matrix(sigma_lbm)
 
@@ -433,135 +452,3 @@ def cluster_matrix(cluster: np.ndarray) -> np.ndarray:
     M = np.eye(n) - clust_mat
 
     return M
-
-
-def transform(
-    data: np.ndarray,
-    coords: np.ndarray,
-    method: str = "nn",
-    radius: Optional[float] = None,
-    latlon: bool = True,
-    cluster: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """
-    Apply spatial differencing transformation to data.
-
-    Parameters
-    ----------
-    data : ndarray of shape (n,) or (n, k)
-        Data to transform. Can be a single variable (1D) or multiple
-        variables (2D with observations in rows).
-    coords : ndarray of shape (n, 2)
-        Coordinates for each observation. Not used for method='cluster'.
-    method : str, default 'nn'
-        Transformation method:
-        - 'nn': nearest-neighbor differencing
-        - 'iso': isotropic (radius-based) differencing
-        - 'lbmgls': LBM-GLS transformation (recommended by Muller-Watson)
-        - 'cluster': within-cluster demeaning
-    radius : float, optional
-        Radius for isotropic method (required if method='iso')
-    latlon : bool, default True
-        If True, use Haversine distance; if False, use Euclidean
-    cluster : ndarray, optional
-        Cluster identifiers (required if method='cluster')
-
-    Returns
-    -------
-    ndarray
-        Transformed data with same shape as input
-    """
-    if method == "nn":
-        M = nn_matrix(coords, latlon=latlon)
-    elif method == "iso":
-        if radius is None:
-            raise ValueError("radius must be specified for method='iso'")
-        M = iso_matrix(coords, radius, latlon=latlon)
-    elif method == "lbmgls":
-        M = lbmgls_matrix(coords, latlon=latlon)
-    elif method == "cluster":
-        if cluster is None:
-            raise ValueError("cluster must be specified for method='cluster'")
-        M = cluster_matrix(cluster)
-    else:
-        raise ValueError(
-            f"Unknown method: {method}. Use 'nn', 'iso', 'lbmgls', or 'cluster'."
-        )
-
-    out = M @ data
-    if method == "lbmgls":
-        out = out - out.mean(axis=0)
-    return out
-
-
-def get_transformation_stats(
-    coords: np.ndarray,
-    method: str = "nn",
-    radius: Optional[float] = None,
-    latlon: bool = True,
-) -> dict:
-    """
-    Compute summary statistics for the transformation matrix.
-
-    Useful for diagnosing the spatial structure and checking for potential issues.
-
-    Parameters
-    ----------
-    coords : ndarray of shape (n, 2)
-        Coordinates array
-    method : str, default 'nn'
-        Transformation method: 'nn' or 'iso'
-    radius : float, optional
-        Radius for isotropic method
-    latlon : bool, default True
-        If True, use Haversine distance
-
-    Returns
-    -------
-    dict
-        Dictionary containing:
-        - n_obs: number of observations
-        - method: transformation method used
-        - dist_min: minimum pairwise distance
-        - dist_max: maximum pairwise distance
-        - dist_mean: mean pairwise distance
-        - dist_median: median pairwise distance
-        - nn_dist_mean: mean nearest-neighbor distance
-        - nn_dist_max: max nearest-neighbor distance
-        - n_isolated: (for iso method) number of isolated observations
-    """
-    distmat = get_distance_matrix(coords, latlon=latlon)
-    n = coords.shape[0]
-    upper_tri = distmat[np.triu_indices(n, k=1)]
-
-    distmat_pos = distmat.copy()
-    distmat_pos[distmat_pos <= 0.0] = np.inf
-    nn_distances = np.min(distmat_pos, axis=1)
-
-    stats = {
-        "n_obs": n,
-        "method": method,
-        "dist_min": upper_tri.min(),
-        "dist_max": upper_tri.max(),
-        "dist_mean": upper_tri.mean(),
-        "dist_median": np.median(upper_tri),
-        "nn_dist_mean": nn_distances.mean(),
-        "nn_dist_max": nn_distances.max(),
-    }
-
-    if method == "iso" and radius is not None:
-        stats["radius"] = radius
-        if latlon:
-            fraction = great_circle_fraction_matrix(coords)
-            neighbors = (fraction <= float(radius) / EARTH_CIRCUMFERENCE_M) & (
-                fraction > 0.0
-            )
-        else:
-            neighbors = (distmat <= radius) & (distmat > 0.0)
-        neighbor_counts = neighbors.sum(axis=1)
-        stats["n_isolated"] = (neighbor_counts == 0).sum()
-        stats["neighbors_mean"] = neighbor_counts.mean()
-        stats["neighbors_min"] = neighbor_counts.min()
-        stats["neighbors_max"] = neighbor_counts.max()
-
-    return stats

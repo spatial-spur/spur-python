@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import importlib
-from inspect import Parameter, signature
+from dataclasses import dataclass
 import math
 import os
 from typing import Any, Literal, Optional
@@ -23,7 +23,7 @@ from .types import (
     Tests,
 )
 from .utils.dist import (
-    EARTH_RADIUS_M,
+    EARTH_CIRCUMFERENCE_M,
     get_cbar,
     get_distance_matrix,
     normalized_distmat,
@@ -51,6 +51,7 @@ from .utils.matrix import (
     get_sigma_residual,
     iso_matrix,
     lbmgls_matrix,
+    lbmgls_matrix_from_distances,
     nn_matrix,
     orthonormal_design_basis,
     validate_and_project_residual_y,
@@ -60,8 +61,7 @@ from .utils.matrix import (
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
-SPUR_RUST_API_VERSION = 3
-EARTH_CIRCUMFERENCE_M = 2.0 * math.pi * EARTH_RADIUS_M
+SPUR_RUST_API_VERSION = 4
 
 
 def _different_covariance_shapes(a: np.ndarray, b: np.ndarray) -> bool:
@@ -69,16 +69,9 @@ def _different_covariance_shapes(a: np.ndarray, b: np.ndarray) -> bool:
 
 
 def _validate_i1_shapes(
-    distmat: np.ndarray, r: np.ndarray, m: np.ndarray | None = None
+    distmat: np.ndarray, omega: Callable[[float], np.ndarray]
 ) -> None:
-    def omega(rho: float) -> np.ndarray:
-        c = get_cbar(rho, distmat)
-        sigma = (
-            get_sigma_dm(distmat, c) if m is None else get_sigma_residual(distmat, c, m)
-        )
-        return r.T @ sigma @ r
-
-    lo, mid, hi = (omega(rho) for rho in (0.01, 0.5, 0.95))
+    lo, mid, hi = (omega(get_cbar(rho, distmat)) for rho in (0.01, 0.5, 0.95))
     if not _different_covariance_shapes(lo, mid) and not _different_covariance_shapes(
         lo, hi
     ):
@@ -134,7 +127,9 @@ def _require_rust_if_requested(resolved_backend: str) -> Any | None:
     rust_mod = load_rust_backend()
     if rust_mod is None and resolved_backend == "rust":
         raise RuntimeError(
-            "Rust backend requested, but a compatible `spatial_spur_rust` is unavailable. Build the matching development adapter with SPUR API 3 and SCPC API 7."
+            "Rust backend requested, but a compatible `spatial_spur_rust` is unavailable. "
+            f"Build the matching development adapter with SPUR API {SPUR_RUST_API_VERSION} "
+            f"and SCPC API {RUST_API_VERSION}."
         )
     return rust_mod
 
@@ -285,84 +280,83 @@ def _run_spur_test(
     if rust_res is not None:
         return rust_res
     design_basis = None if x_in is None else orthonormal_design_basis(x_in)
+    distmat = normalized_distmat(coords, latlon=latlong)
+    basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
     return _fallback_spur_test(
         test_type,
-        y,
-        normalized_distmat(coords, latlon=latlong),
+        distmat,
         emat,
-        design_basis,
+        basis,
         tied=tied,
         fallback_reason=_fallback_reason(backend, tied),
     )
 
 
-def _fallback_spur_test(
-    test_type: str,
+@dataclass(slots=True)
+class _FallbackSpurBasis:
+    r: np.ndarray
+    response: np.ndarray
+    brownian: np.ndarray
+    omega: Callable[[float], np.ndarray]
+    projection: np.ndarray | None
+
+
+def _prepare_fallback_spur_basis(
     y: np.ndarray,
     distmat: np.ndarray,
-    emat: np.ndarray,
+    q: int,
     design_basis: np.ndarray | None,
-    *,
-    tied: bool,
-    fallback_reason: str | None,
-) -> TestResult:
-    q = emat.shape[0]
+) -> _FallbackSpurBasis:
     projection = (
         None if design_basis is None else np.eye(len(y)) - design_basis @ design_basis.T
     )
-
-    def sigma(c: float) -> np.ndarray:
-        if projection is None:
-            return get_sigma_dm(distmat, c)
-        return get_sigma_residual(distmat, c, projection)
-
-    sigdm_bm = (
+    sigma_bm = (
         demean_matrix(get_sigma_lbm(distmat))
         if projection is None
-        else sigma(get_cbar(0.999, distmat))
+        else get_sigma_residual(distmat, get_cbar(0.999, distmat), projection)
     )
-    r = get_r(sigdm_bm, q)
-    P = (
+    r = get_r(sigma_bm, q)
+    response = (
         validate_and_project_y(y, r)
         if design_basis is None
         else validate_and_project_residual_y(y, r, design_basis)
     )
-    if test_type.startswith("i0"):
-        return _fallback_spur_i0(
-            test_type, distmat, emat, r, P, sigdm_bm, sigma, tied, fallback_reason
+
+    def omega(c: float) -> np.ndarray:
+        sigma = (
+            get_sigma_dm(distmat, c)
+            if projection is None
+            else get_sigma_residual(distmat, c, projection)
         )
-    return _fallback_spur_i1(
-        test_type,
-        distmat,
-        emat,
-        r,
-        P,
-        sigdm_bm,
-        sigma,
-        projection,
-        tied,
-        fallback_reason,
-    )
+        return r.T @ sigma @ r
+
+    return _FallbackSpurBasis(r, response, r.T @ sigma_bm @ r, omega, projection)
+
+
+def _fallback_spur_test(
+    test_type: str,
+    distmat: np.ndarray,
+    emat: np.ndarray,
+    basis: _FallbackSpurBasis,
+    *,
+    tied: bool,
+    fallback_reason: str | None,
+) -> TestResult:
+    run = _fallback_spur_i0 if test_type.startswith("i0") else _fallback_spur_i1
+    return run(test_type, distmat, emat, basis, tied, fallback_reason)
 
 
 def _fallback_spur_i0(
     test_type: str,
     distmat: np.ndarray,
     emat: np.ndarray,
-    r: np.ndarray,
-    P: np.ndarray,
-    sigdm_bm: np.ndarray,
-    sigma: Callable[[float], np.ndarray],
+    basis: _FallbackSpurBasis,
     tied: bool,
     fallback_reason: str | None,
 ) -> TestResult:
-    q = emat.shape[0]
-    rho = 0.001
-    c = get_cbar(rho, distmat)
-    sigdm_rho = sigma(c)
-
-    om_rho = r.T @ sigdm_rho @ r
-    om_bm = r.T @ sigdm_bm @ r
+    P = basis.response
+    om_rho = basis.omega(get_cbar(0.001, distmat))
+    om_bm = basis.brownian
     if not _different_covariance_shapes(om_rho, om_bm):
         raise ValueError(
             "SPUR experiment is uninformative: covariance shapes are proportional."
@@ -387,23 +381,12 @@ def _fallback_spur_i0(
     n_rho = 30
     rho_grid = np.linspace(rho_min, rho_max, n_rho)
 
-    ch_om_ho_list = []
-    for i in range(n_rho):
-        rho_i = rho_grid[i]
-        if rho_i > 0:
-            c_i = get_cbar(rho_i, distmat)
-            sigdm_ho_i = sigma(c_i)
-            om_ho_i = r.T @ sigdm_ho_i @ r
-        else:
-            om_ho_i = np.eye(q)
-        ch_om_ho_list.append(cholesky_upper(om_ho_i))
-
     pvalue_vec = np.zeros(n_rho)
     cvalue_mat = np.zeros((n_rho, 3))
     sz_vec = np.array([0.01, 0.05, 0.10])
 
-    for ir in range(n_rho):
-        ch_om_ho_ir = ch_om_ho_list[ir]
+    for ir, rho in enumerate(rho_grid):
+        ch_om_ho_ir = cholesky_upper(basis.omega(get_cbar(rho, distmat)))
         y_ho = ch_om_ho_ir.T @ emat
         y_ho_ho = ch_omi_ho @ y_ho
         y_ho_ha = ch_omi_ha @ y_ho
@@ -435,24 +418,20 @@ def _fallback_spur_i1(
     test_type: str,
     distmat: np.ndarray,
     emat: np.ndarray,
-    r: np.ndarray,
-    P: np.ndarray,
-    sigdm_bm: np.ndarray,
-    sigma: Callable[[float], np.ndarray],
-    projection: np.ndarray | None,
+    basis: _FallbackSpurBasis,
     tied: bool,
     fallback_reason: str | None,
 ) -> TestResult:
-    om_ho = r.T @ sigdm_bm @ r
+    P = basis.response
+    om_ho = basis.brownian
 
-    _validate_i1_shapes(distmat, r, projection)
+    _validate_i1_shapes(distmat, basis.omega)
     ha_parm = (
-        get_ha_param_i1(om_ho, distmat, r, emat)
-        if projection is None
-        else get_ha_param_i1_residual(om_ho, distmat, r, emat, projection)
+        get_ha_param_i1(om_ho, distmat, basis.r, emat)
+        if basis.projection is None
+        else get_ha_param_i1_residual(om_ho, distmat, basis.r, emat, basis.projection)
     )
-    sigdm_ha = sigma(ha_parm)
-    om_ha = r.T @ sigdm_ha @ r
+    om_ha = basis.omega(ha_parm)
 
     ch_om_ho = cholesky_upper(om_ho)
     omi_ho = np.linalg.inv(om_ho)
@@ -1031,8 +1010,9 @@ def spurtransform(
         if sample[clustvar].isna().any():
             raise ValueError(f"Cluster column '{clustvar}' contains missing values.")
         cluster = sample[clustvar].to_numpy()
-        codes, _ = pd.factorize(cluster, sort=False)
-        cluster_codes = np.ascontiguousarray(codes, dtype=np.int64)
+        if rust_mod is not None:
+            codes, _ = pd.factorize(cluster, sort=False)
+            cluster_codes = np.ascontiguousarray(codes, dtype=np.int64)
     else:
         if n < 2:
             raise ValueError(
@@ -1060,7 +1040,7 @@ def spurtransform(
                 raise ValueError("radius must be finite and strictly positive.")
             radius = radius_val
 
-    if rust_mod is not None and (n >= 2 or resolved_backend == "rust"):
+    if rust_mod is not None:
         radius_arg = None
         if transformation == "iso" and radius is not None:
             radius_arg = (
@@ -1075,11 +1055,7 @@ def spurtransform(
             coords=coords_rust,
             latlong=bool(latlon),
             radius=radius_arg,
-            strict_lt=False,
-            exclude_zero_distances=True,
             cluster_id=cluster_codes,
-            return_matrix=False,
-            demean_lbmgls=True,
             nthreads=resolved_nthreads,
         )
         transformed = np.asarray(rust_res["transformed"], dtype=float)
@@ -1325,26 +1301,6 @@ def spur(
     backend = resolve_backend(backend)
     nthreads = validate_nthreads(nthreads)
     rust_mod = _require_rust_if_requested(backend)
-    scpc_options: dict[str, Any] = {}
-    scpc_parameters = signature(scpc).parameters
-    accepts_kwargs = any(
-        param.kind == Parameter.VAR_KEYWORD for param in scpc_parameters.values()
-    )
-    supports_backend = "backend" in scpc_parameters or accepts_kwargs
-    if supports_backend:
-        scpc_options["backend"] = backend
-    elif backend == "rust":
-        raise RuntimeError(
-            "Rust execution in spur() requires a compatible SCPC package."
-        )
-    if nthreads is not None:
-        if "nthreads" in scpc_parameters or accepts_kwargs:
-            scpc_options["nthreads"] = nthreads
-        elif supports_backend and backend != "fallback":
-            raise RuntimeError(
-                "Selecting a thread count for spur() requires a compatible SCPC package."
-            )
-
     if not data.index.is_unique:
         data = data.reset_index(drop=True)
     try:
@@ -1403,15 +1359,18 @@ def spur(
             int(nrep),
             np.ascontiguousarray(transform_input, dtype=np.float64),
             latlong=bool(latlong),
-            demean_lbmgls=True,
             nthreads=nthreads,
         )
 
     any_tied = native is not None and any(native[k]["tied"] for k in test_types)
     use_native = native is not None and (backend == "rust" or not any_tied)
     distmat = None if use_native else normalized_distmat(coords, latlon=latlong)
-    if not use_native and design_basis is None:
-        design_basis = orthonormal_design_basis(x)
+    if not use_native:
+        assert distmat is not None
+        if design_basis is None:
+            design_basis = orthonormal_design_basis(x)
+        levels_basis = _prepare_fallback_spur_basis(y, distmat, q, None)
+        residual_basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
     levels_model = fitted.fit()
     fallback_reason = _fallback_reason(backend, any_tied)
     stage_backends: dict[str, str] = {}
@@ -1429,10 +1388,9 @@ def spur(
             assert distmat is not None
             result = _fallback_spur_test(
                 test_type,
-                y,
                 distmat,
                 emat,
-                design_basis if test_type.endswith("resid") else None,
+                residual_basis if test_type.endswith("resid") else levels_basis,
                 tied=tied,
                 fallback_reason=fallback_reason,
             )
@@ -1446,7 +1404,8 @@ def spur(
         transformed = np.asarray(native["transformed_vars"], dtype=float)
         stage_backends["transform"] = "rust"
     else:
-        transformed = lbmgls_matrix(coords, latlon=latlong) @ transform_input
+        assert distmat is not None
+        transformed = lbmgls_matrix_from_distances(distmat) @ transform_input
         transformed -= transformed.mean(axis=0)
         stage_backends["transform"] = "fallback"
         if fallback_reason is not None:
@@ -1489,7 +1448,8 @@ def spur(
             avc=avc,
             uncond=uncond,
             cvs=cvs,
-            **scpc_options,
+            backend=backend,
+            nthreads=nthreads,
         )
         fits[stage] = RegressionResult(
             model=model,
@@ -1498,12 +1458,9 @@ def spur(
             if stage == "transformed_scpc"
             else None,
         )
-        stage_backends[stage] = getattr(result, "backend", "fallback")
-        reason = getattr(result, "fallback_reason", None)
-        if not supports_backend and stage_backends[stage] == "fallback":
-            reason = "scpc_backend_api_unavailable"
-        if reason is not None:
-            fallback_reasons[stage] = reason
+        stage_backends[stage] = result.backend
+        if result.fallback_reason is not None:
+            fallback_reasons[stage] = result.fallback_reason
 
     return PipelineResult(
         tests=Tests(tests["i0"], tests["i1"], tests["i0resid"], tests["i1resid"]),
@@ -1512,7 +1469,7 @@ def spur(
         if all(x == "rust" for x in stage_backends.values())
         else "fallback",
         tied=any(result.tied for result in tests.values())
-        or any(bool(getattr(fit.scpc, "tied", False)) for fit in fits.values()),
+        or any(fit.scpc.tied for fit in fits.values()),
         stage_backends=stage_backends,
         fallback_reasons=fallback_reasons,
     )

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from spur import spurtransform
-from spur.utils.matrix import transform
+from spur.utils.matrix import nn_matrix
 from tests.config import ATOL, PARITY_ATOL, PARITY_RTOL
 from tests.utils import (
     STATA,
@@ -151,7 +151,7 @@ def test_spurtransform_evaluates_terms_on_one_complete_case_sample() -> None:
     npt.assert_allclose(out["h_I(x ** 2)"], np.insert(x2 - np.mean(x2), 1, np.nan))
 
 
-def test_spurtransform_matches_direct_transform(
+def test_spurtransform_matches_nearest_neighbor_matrix(
     sample_df: pd.DataFrame,
 ) -> None:
     out = spurtransform(
@@ -163,7 +163,7 @@ def test_spurtransform_matches_direct_transform(
         prefix="nn_",
     )
     coords = sample_df[["lat", "lon"]].to_numpy()
-    direct = transform(sample_df["y"].to_numpy(), coords, method="nn", latlon=True)
+    direct = nn_matrix(coords, latlon=True) @ sample_df["y"].to_numpy()
 
     npt.assert_allclose(out["nn_y"].to_numpy(), direct, atol=1e-14, rtol=0.0)
 

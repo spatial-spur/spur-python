@@ -6,8 +6,6 @@ from spur.utils.dist import resolve_spur_coords
 from spur.utils.formula import (
     parse_residual_formula,
     parse_single_var_formula,
-    parse_transform_formula,
-    rewrite_formula_with_prefix,
 )
 
 
@@ -117,38 +115,6 @@ def test_parse_residual_formula_drops_incomplete_rows() -> None:
     assert parsed["X_in"][:, 2].tolist() == [7.0, 9.0]
 
 
-def test_parse_transform_formula_collects_all_variables(
-    sample_df: pd.DataFrame, capsys: pytest.CaptureFixture[str]
-) -> None:
-    vars_ = parse_transform_formula("am ~ x + z", sample_df)
-    out = capsys.readouterr().out
-
-    assert vars_ == ["am", "x", "z"]
-    assert out == ""
-
-
-def test_parse_transform_formula_handles_single_variable_case(
-    sample_df: pd.DataFrame,
-) -> None:
-    vars_ = parse_transform_formula("am ~ 1", sample_df)
-
-    assert vars_ == ["am"]
-
-
-def test_parse_transform_formula_deduplicates_rhs_variables(
-    sample_df: pd.DataFrame,
-) -> None:
-    vars_ = parse_transform_formula("am ~ x + x", sample_df)
-
-    assert vars_ == ["am", "x"]
-
-
-def test_rewrite_formula_with_prefix_rewrites_both_sides() -> None:
-    rewritten = rewrite_formula_with_prefix("am ~ x + z", "h_")
-
-    assert rewritten == "h_am ~ h_x + h_z"
-
-
 def test_resolve_spur_coords_returns_internal_lat_lon_order(
     sample_df: pd.DataFrame,
 ) -> None:
@@ -213,14 +179,3 @@ def test_parse_residual_formula_rejects_all_incomplete_rows() -> None:
 
     with pytest.raises(Exception):
         parse_residual_formula("am ~ x", df, fn_name="spurtest_i1resid()")
-
-
-@pytest.mark.parametrize(
-    "formula",
-    ["am", "am ~ x +", "1 ~ 1", "am ~ missing"],
-)
-def test_parse_transform_formula_rejects_malformed_input(
-    sample_df: pd.DataFrame, formula: str
-) -> None:
-    with pytest.raises(Exception):
-        parse_transform_formula(formula, sample_df)

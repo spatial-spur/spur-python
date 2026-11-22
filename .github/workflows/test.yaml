@@ -73,7 +73,7 @@ jobs:
           cache-dependency-glob: package/uv.lock
       - name: Install locked dependencies and build frontend wheels
         run: |
-          uv sync --locked --group dev --no-install-project
+          uv sync --locked --group dev --no-install-project --no-install-package scpc-python
           uv build --wheel --out-dir ../wheels
           uv build ../scpc-python --wheel --out-dir ../wheels
       - name: Build the native wheel

@@ -98,34 +98,26 @@ def haversine_distance(
     ndarray
         Distance in meters
     """
-    lat1_arr = np.asarray(lat1, dtype=float)
-    lon1_arr = np.asarray(lon1, dtype=float)
-    lat2_arr = np.asarray(lat2, dtype=float)
-    lon2_arr = np.asarray(lon2, dtype=float)
+    return EARTH_CIRCUMFERENCE_M * great_circle_fraction(lat1, lon1, lat2, lon2)
 
-    phi1 = np.radians(lat1_arr)
-    phi2 = np.radians(lat2_arr)
-    dphi = np.radians(lat2_arr - lat1_arr)
-    dlam = np.radians(lon2_arr - lon1_arr)
 
-    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
-    return 2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+def great_circle_fraction(
+    lat1: ArrayLike, lon1: ArrayLike, lat2: ArrayLike, lon2: ArrayLike
+) -> np.ndarray:
+    """Compute great-circle distance as a fraction of Earth circumference."""
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    lam1, lam2 = np.radians(lon1), np.radians(lon2)
+    lat_sin = np.sin((phi2 - phi1) * 0.5)
+    lon_sin = np.sin((lam2 - lam1) * 0.5)
+    a = lat_sin * lat_sin + np.cos(phi1) * np.cos(phi2) * lon_sin * lon_sin
+    # The shared core uses the reciprocal of pi for the inclusive ISO cutoff.
+    return np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0))) * (1.0 / np.pi)
 
 
 def great_circle_fraction_matrix(coords: np.ndarray) -> np.ndarray:
-    """Compute great-circle distance as a fraction of Earth circumference (arcsin / pi)."""
-    lat = coords[:, 0]
-    lon = coords[:, 1]
-    lat1, lat2 = np.meshgrid(lat, lat, indexing="ij")
-    lon1, lon2 = np.meshgrid(lon, lon, indexing="ij")
-    phi1 = np.radians(lat1)
-    phi2 = np.radians(lat2)
-    dphi = np.radians(lat2 - lat1)
-    dlam = np.radians(lon2 - lon1)
-    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
-    fraction = np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0))) / np.pi
-    np.fill_diagonal(fraction, 0.0)
-    return fraction
+    """Compute pairwise great-circle fractions for latitude and longitude."""
+    lat, lon = coords.T
+    return great_circle_fraction(lat[:, None], lon[:, None], lat, lon)
 
 
 def get_distance_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
@@ -156,11 +148,8 @@ def get_distance_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
                 f"(limit: 10,000). At this size the matrix requires >{n**2 * 8 // 1_000_000} MB "
                 "and will likely OOM. Use a blocked/sparse implementation for large datasets."
             )
-        lat = coords[:, 0]
-        lon = coords[:, 1]
-        lat1, lat2 = np.meshgrid(lat, lat, indexing="ij")
-        lon1, lon2 = np.meshgrid(lon, lon, indexing="ij")
-        distmat = haversine_distance(lat1, lon1, lat2, lon2)
+        lat, lon = coords.T
+        distmat = haversine_distance(lat[:, None], lon[:, None], lat, lon)
     else:
         from scipy.spatial.distance import cdist
 

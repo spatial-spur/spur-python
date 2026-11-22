@@ -6,7 +6,7 @@ import numpy.testing as npt
 import pandas as pd
 import pytest
 
-from spur.utils.matrix import transform
+from spur import spurtransform
 from tests.config import ATOL, PARITY_ATOL, PARITY_RTOL, RTOL
 from tests.utils import (
     STATA,
@@ -64,6 +64,21 @@ def run_stata_transform(
     return pd.read_csv(output_csv)["d_y"].to_numpy()
 
 
+def transform_values(
+    values: np.ndarray, coords: np.ndarray, method: str, radius: float | None = None
+) -> np.ndarray:
+    data = pd.DataFrame({"y": values, "lat": coords[:, 0], "lon": coords[:, 1]})
+    return spurtransform(
+        "y ~ 1",
+        data,
+        lat="lat",
+        lon="lon",
+        transformation=method,
+        radius=radius,
+        backend="fallback",
+    )["h_y"].to_numpy()
+
+
 @pytest.mark.parametrize(
     "method,radius", [("nn", None), ("iso", 1_000_000.0), ("lbmgls", None)]
 )
@@ -74,23 +89,16 @@ def test_transform_maps_constant_to_zero(
 ) -> None:
     constant = np.ones(len(grid_coords)) * 3.14
 
-    result = transform(
-        constant,
-        grid_coords,
-        method=method,
-        radius=radius,
-        latlon=True,
-    )
+    result = transform_values(constant, grid_coords, method, radius)
 
     npt.assert_allclose(result, 0.0, atol=ATOL, rtol=RTOL)
 
 
 def test_transform_maps_cluster_constant_to_zero() -> None:
-    coords = np.zeros((6, 2))
-    cluster = np.array([1, 1, 2, 2, 3, 3])
-    constant = np.ones(6) * 7.0
-
-    result = transform(constant, coords, method="cluster", cluster=cluster)
+    data = pd.DataFrame({"y": np.full(6, 7.0), "group": [1, 1, 2, 2, 3, 3]})
+    result = spurtransform(
+        "y ~ 1", data, transformation="cluster", clustvar="group", backend="fallback"
+    )["h_y"]
 
     npt.assert_allclose(result, 0.0, atol=ATOL, rtol=RTOL)
 
@@ -101,26 +109,16 @@ def test_transform_is_linear_for_nn(grid_coords: np.ndarray) -> None:
     z = rng.standard_normal(len(grid_coords))
     a, b = 2.5, -1.3
 
-    lhs = transform(a * y + b * z, grid_coords, method="nn", latlon=True)
-    rhs = a * transform(y, grid_coords, method="nn", latlon=True)
-    rhs += b * transform(z, grid_coords, method="nn", latlon=True)
+    lhs = transform_values(a * y + b * z, grid_coords, "nn")
+    rhs = a * transform_values(y, grid_coords, "nn")
+    rhs += b * transform_values(z, grid_coords, "nn")
 
     npt.assert_allclose(lhs, rhs, atol=1e-10, rtol=0.0)
 
 
-def test_transform_requires_radius_for_iso(grid_coords: np.ndarray) -> None:
-    with pytest.raises(ValueError, match="radius"):
-        transform(np.ones(len(grid_coords)), grid_coords, method="iso")
-
-
 def test_transform_rejects_unknown_method(grid_coords: np.ndarray) -> None:
-    with pytest.raises(ValueError, match="Unknown method"):
-        transform(np.ones(len(grid_coords)), grid_coords, method="bogus")
-
-
-def test_transform_requires_cluster_argument(grid_coords: np.ndarray) -> None:
-    with pytest.raises(ValueError, match="cluster"):
-        transform(np.ones(len(grid_coords)), grid_coords, method="cluster")
+    with pytest.raises(ValueError, match="Unknown transformation"):
+        transform_values(np.ones(len(grid_coords)), grid_coords, "bogus")
 
 
 @pytest.mark.skipif(STATA is None, reason="stata-mp not installed")
@@ -131,7 +129,7 @@ def test_transform_matches_stata_for_lbmgls(
     rng = np.random.default_rng(42)
     values = rng.standard_normal(len(grid_coords))
 
-    py_value = transform(values, grid_coords, method="lbmgls", latlon=True)
+    py_value = transform_values(values, grid_coords, "lbmgls")
     st_value = run_stata_transform(
         tmp_path,
         grid_coords,

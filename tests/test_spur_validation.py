@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from spur import spurtransform
+from spur import spurtest_i0resid, spurtest_i1resid, spurtransform
+from spur.utils.dist import haversine_distance
 from spur.core import load_rust_backend
 from spur.utils.matrix import cluster_matrix
 
@@ -92,60 +95,73 @@ def test_spurtransform_spatial_rejects_single_observation(
         )
 
 
-def test_residual_no_intercept_invariance_and_transform_helper_alignment(capsys) -> None:
-    import spur
-    from spur.utils.dist import haversine_distance
-    from spur.utils.matrix import get_transformation_stats, iso_matrix, transform
-
+@pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)
+@pytest.mark.parametrize("formula", ["y ~ 0 + x1", "y ~ x1"])
+def test_residual_projection_is_invariant_to_nuisance_shifts(
+    backend: str, formula: str
+) -> None:
     rng = np.random.default_rng(303)
     n = 42
     sx = np.linspace(0.0, 1.0, n)
     sy = np.sin(np.arange(n) * 0.4)
     x1 = 1.5 + rng.normal(size=n)
-    eps = np.sin(np.arange(n) * 0.3) + 0.1 * np.arange(n)
-    df = pd.DataFrame({"y": eps, "x1": x1, "sx": sx, "sy": sy})
-    df_shift = df.copy()
-    df_shift["y"] = eps + 1e6 * x1
-
-    for backend in ("fallback", "rust"):
-        for fn in (spur.spurtest_i0resid, spur.spurtest_i1resid):
-            r1 = fn("y ~ 0 + x1", df, coords_euclidean=("sx", "sy"), q=6, nrep=120, seed=17, backend=backend)
-            r2 = fn("y ~ 0 + x1", df_shift, coords_euclidean=("sx", "sy"), q=6, nrep=120, seed=17, backend=backend)
-            np.testing.assert_allclose(r1.LR, r2.LR, rtol=1e-8, atol=1e-8)
-            np.testing.assert_allclose(r1.pvalue, r2.pvalue, rtol=1e-12, atol=1e-12)
-
-    # Geographic exact boundary iso & Euclidean exact boundary match Rust vs fallback and stay silent
-    geo_radius = float(haversine_distance(0.0, 0.0, 0.0, 1.0))
-    df_geo = pd.DataFrame(
-        {"y": [10.0, 20.0, 50.0], "lat": [0.0, 0.0, 15.0], "lon": [0.0, 1.0, 15.0]}
+    y = (np.arange(n) ** 2 % 11).astype(float)
+    shift = 1e6 * x1 if formula == "y ~ 0 + x1" else 1e13
+    data = pd.DataFrame({"y": y, "x1": x1, "sx": sx, "sy": sy})
+    shifted = data.assign(y=y + shift)
+    opts: dict[str, Any] = dict(
+        coords_euclidean=("sx", "sy"), q=8, nrep=1000, seed=17, backend=backend
     )
-    geo_fb = spur.spurtransform("y ~ 1", df_geo, lon="lon", lat="lat", transformation="iso", radius=geo_radius, backend="fallback")
-    assert capsys.readouterr().out == ""
-    geo_ru = spur.spurtransform("y ~ 1", df_geo, lon="lon", lat="lat", transformation="iso", radius=geo_radius, backend="rust")
-    np.testing.assert_allclose(geo_ru["h_y"], geo_fb["h_y"], rtol=1e-12, atol=1e-12)
+    for fn in (spurtest_i0resid, spurtest_i1resid):
+        base = fn(formula, data, **opts)
+        result = fn(formula, shifted, **opts)
+        np.testing.assert_allclose(base.LR, result.LR, rtol=1e-8, atol=1e-8)
+        np.testing.assert_allclose(base.pvalue, result.pvalue, rtol=0, atol=0)
 
-    _ = iso_matrix(df_geo[["lat", "lon"]].to_numpy(), radius=geo_radius, latlon=True)
-    assert capsys.readouterr().out == ""
 
-    # Stats helper aligns with positive-distance NN and inclusive iso radius
-    coords_stats = np.array([[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [2.5, 0.0]])
-    st_nn = get_transformation_stats(coords_stats, method="nn", latlon=False)
-    assert np.isclose(st_nn["nn_dist_mean"], (1.0 + 1.0 + 1.0 + 1.5) / 4.0)
-    st_iso = get_transformation_stats(coords_stats, method="iso", radius=1.0, latlon=False)
-    assert st_iso["n_isolated"] == 1
-
-    # Helper transform(..., method="lbmgls") centers output
-    tr_lbm = transform(
-        np.array([1.0, 9.0, 20.0]) + 1e4,
-        coords_stats[[0, 2, 3]],
-        method="lbmgls",
-        latlon=False,
+@pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)
+@pytest.mark.parametrize(
+    "site1,site2",
+    [
+        ((0.0, 0.0), (0.0, 1.0)),
+        ((0.0, -178.6), (0.0, -178.5)),
+        (
+            (-1.0036422005124446, 10.076763636412846),
+            (37.11177842377785, -142.9944155287363),
+        ),
+    ],
+)
+def test_spurtransform_geographic_iso_includes_exact_radius(
+    backend: str, site1: tuple[float, float], site2: tuple[float, float], capsys
+) -> None:
+    lat1, lon1 = site1
+    lat2, lon2 = site2
+    data = pd.DataFrame({"y": [1.0, 4.0], "lat": [lat1, lat2], "lon": [lon1, lon2]})
+    radius = float(haversine_distance(*site1, *site2))
+    opts: dict[str, Any] = dict(
+        lon="lon", lat="lat", transformation="iso", backend=backend
     )
-    assert tr_lbm.shape == (3,)
-    assert abs(float(np.mean(tr_lbm))) < 1e-12
-    assert abs(float(np.mean(transform(np.array([1.0, 3.0, 9.0]) + 1e6, np.array([[0.0, 0.0], [1.0, 0.0], [3.0, 0.0]]), method="lbmgls", latlon=False)))) < 1e-12
 
-    import spatial_spur_rust as native
+    inclusive = spurtransform("y ~ 1", data, radius=radius, **opts)
+    outside = spurtransform("y ~ 1", data, radius=radius * (1.0 - 1e-12), **opts)
+    np.testing.assert_array_equal(inclusive["h_y"], [-3.0, 3.0])
+    np.testing.assert_array_equal(outside["h_y"], 0.0)
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("backend", TRANSFORM_BACKENDS)
+def test_spurtransform_centers_lbmgls_output(backend: str) -> None:
+    data = pd.DataFrame({"y": [1e6 + 1.0, 1e6 + 3.0, 1e6 + 9.0], "x": [0.0, 1.0, 3.0]})
+    result = spurtransform(
+        "y ~ 1", data, coords_euclidean=("x",), transformation="lbmgls", backend=backend
+    )
+    assert float(result["h_y"].mean()) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_native_iso_rejects_boolean_radius() -> None:
+    native = load_rust_backend()
+    if native is None:
+        pytest.skip("Rust backend is unavailable")
     with pytest.raises(TypeError, match="bool"):
         native.run_spur_transform(
             "iso",

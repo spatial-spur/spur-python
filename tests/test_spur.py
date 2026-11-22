@@ -77,11 +77,20 @@ def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
     draws_seen = []
     tests_seen = {}
 
-    def fake_test(test_type, response, distances, draws, basis, **kwargs):
-        tests_seen[test_type] = (response, distances, basis)
+    prep_calls = []
+    prepare = pipeline._prepare_fallback_spur_basis
+
+    def record_preparation(response, distances, q, design_basis):
+        basis = prepare(response, distances, q, design_basis)
+        prep_calls.append((response, distances, basis))
+        return basis
+
+    def fake_test(test_type, distances, draws, basis, **kwargs):
+        tests_seen[test_type] = basis
         draws_seen.append(draws)
         return TestResult(test_type, 1.0, 1.0, np.array([1.0, 2.0, 3.0]), 0.01)
 
+    monkeypatch.setattr(pipeline, "_prepare_fallback_spur_basis", record_preparation)
     monkeypatch.setattr(pipeline, "_fallback_spur_test", fake_test)
 
     scpc_calls = []
@@ -89,7 +98,7 @@ def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
     # Wrappers can forward dispatch options through **kwargs.
     def fake_scpc(model, data, **kwargs):
         scpc_calls.append((model, data, kwargs))
-        return SimpleNamespace(backend="fallback")
+        return SimpleNamespace(backend="fallback", fallback_reason=None, tied=False)
 
     monkeypatch.setattr(pipeline, "scpc", fake_scpc)
     from numpy import log
@@ -109,7 +118,11 @@ def test_spur_evaluates_formula_once_on_matched_sample(monkeypatch) -> None:
     assert all(draws is draws_seen[0] for draws in draws_seen)
     expected_y = log(df["y"].to_numpy()[keep])
     expected_x = log(df["x"].to_numpy()[keep])
-    for response, distances, _ in tests_seen.values():
+    assert len(prep_calls) == 2
+    assert prep_calls[0][1] is prep_calls[1][1]
+    assert tests_seen["i0"] is tests_seen["i1"] is prep_calls[0][2]
+    assert tests_seen["i0resid"] is tests_seen["i1resid"] is prep_calls[1][2]
+    for response, distances, _ in prep_calls:
         np.testing.assert_allclose(response, expected_y)
         assert distances.shape == (n - 1, n - 1)
     h = pipeline.lbmgls_matrix(df[["sx", "sy"]].to_numpy()[keep], latlon=False)
@@ -176,7 +189,7 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
     def fake_scpc(model, data, **kwargs):
         assert kwargs["backend"] == "auto"
         assert kwargs["nthreads"] == 1
-        return SimpleNamespace(backend="rust")
+        return SimpleNamespace(backend="rust", fallback_reason=None, tied=False)
 
     monkeypatch.setattr(pipeline, "scpc", fake_scpc)
     result = spur(
@@ -208,34 +221,18 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
     assert not result.tests.i0.tied and result.tests.i0resid.tied
 
 
-def test_pipeline_preserves_literal_intercept_and_reports_legacy_scpc(monkeypatch):
+def test_pipeline_preserves_literal_intercept():
     rng = np.random.default_rng(95)
     df = pd.DataFrame(rng.normal(size=(20, 3)), columns=["y", "Intercept", "sx"])
-    monkeypatch.setattr(
-        pipeline,
-        "_fallback_spur_test",
-        lambda test_type, *args, **kwargs: TestResult(
-            test_type, 1.0, 0.5, np.array([1.0, 2.0, 3.0]), 0.01
-        ),
-    )
-
-    def legacy_scpc(model, data, *, lon, lat, coords_euclidean, avc, uncond, cvs):
-        return SimpleNamespace(backend="fallback")
-
-    monkeypatch.setattr(pipeline, "scpc", legacy_scpc)
     result = spur(
         "y ~ 0 + Intercept",
         df,
         coords_euclidean=["sx"],
-        q=2,
-        nrep=10,
+        q=8,
+        nrep=512,
         backend="fallback",
     )
     assert result.fits.transformed.model.model.exog_names == ["h_Intercept"]
-    assert result.fallback_reasons == {
-        "levels_scpc": "scpc_backend_api_unavailable",
-        "transformed_scpc": "scpc_backend_api_unavailable",
-    }
 
 
 @pytest.mark.parametrize("test_type", ["i0resid", "i1resid"])
