@@ -1,6 +1,6 @@
 from typing import Optional
 import numpy as np
-from .dist import get_distance_matrix
+from .dist import EARTH_CIRCUMFERENCE_M, get_distance_matrix, great_circle_fraction_matrix
 
 
 def demean_matrix(mat: np.ndarray) -> np.ndarray:
@@ -177,6 +177,46 @@ def validate_and_project_y(y: np.ndarray, basis_r: np.ndarray) -> np.ndarray:
     return p_vec
 
 
+def validate_and_project_residual_y(
+    y: np.ndarray, basis_r: np.ndarray, design_basis: np.ndarray
+) -> np.ndarray:
+    """Residualize finite non-constant Y against Q_x and project onto SPUR basis R."""
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    if y_arr.size == 0 or not np.all(np.isfinite(y_arr)):
+        raise ValueError(
+            "Response Y contains NaN or inf values. All values must be finite."
+        )
+    raw_max = float(np.max(np.abs(y_arr)))
+    if float(np.ptp(y_arr)) == 0.0 or not np.isfinite(raw_max) or raw_max == 0.0:
+        raise ValueError(
+            "Response Y has zero variation; SPUR inference requires non-constant Y."
+        )
+    col_scaled = y_arr / raw_max
+    col_norm = float(np.linalg.norm(col_scaled))
+    u = col_scaled - design_basis @ (design_basis.T @ col_scaled)
+    u = u - design_basis @ (design_basis.T @ u)
+    u_max = float(np.max(np.abs(u)))
+    u_norm = float(np.linalg.norm(u))
+    if not np.isfinite(u_max) or u_max == 0.0 or not np.isfinite(u_norm) or u_norm <= 1e-12 * col_norm:
+        raise ValueError(
+            "Residualized response Y has zero variation; SPUR inference requires variation orthogonal to X."
+        )
+    u_scaled = u / u_max
+    u_scaled_norm = u_norm / u_max
+    p_vec = basis_r.T @ u_scaled
+    p_max = float(np.max(np.abs(p_vec)))
+    if not np.isfinite(p_max) or p_max == 0.0:
+        raise ValueError(
+            "Projected SPUR vector R'Y has zero norm; response has no variation in the SPUR basis."
+        )
+    p_norm = p_max * float(np.linalg.norm(p_vec / p_max))
+    if not np.isfinite(p_norm) or p_norm <= 1e-12 * u_scaled_norm:
+        raise ValueError(
+            "Projected SPUR vector R'Y has zero norm; response has negligible variation in the SPUR basis."
+        )
+    return p_vec
+
+
 def cholesky_upper(M: np.ndarray) -> np.ndarray:
     """
     Get upper triangular Cholesky factor.
@@ -272,9 +312,10 @@ def iso_matrix(coords: np.ndarray, radius: float, latlon: bool = True) -> np.nda
     """
     Compute isotropic transformation matrix.
 
-    For each observation, identifies all neighbors within the specified radius
-    and creates a row-normalized weight matrix. The transformation matrix is
-    I - W, which differences each observation from the average of its neighbors.
+    For each observation, identifies all distinct-location neighbors within
+    the specified inclusive radius (`0 < d <= radius`) and creates a
+    row-normalized weight matrix. The transformation matrix is I - W, which
+    differences each observation from the average of its neighbors.
 
     Parameters
     ----------
@@ -300,22 +341,18 @@ def iso_matrix(coords: np.ndarray, radius: float, latlon: bool = True) -> np.nda
     to zeros for these observations.
     """
     n = coords.shape[0]
-    distmat = get_distance_matrix(coords, latlon=latlon)
-
-    neighbors = (distmat <= radius) & (distmat > 0)
+    if latlon:
+        fraction = great_circle_fraction_matrix(coords)
+        neighbors = (fraction <= float(radius) / EARTH_CIRCUMFERENCE_M) & (fraction > 0.0)
+    else:
+        distmat = get_distance_matrix(coords, latlon=False)
+        neighbors = (distmat <= radius) & (distmat > 0.0)
     row_sums = neighbors.sum(axis=1, keepdims=True).astype(float)
     no_neighbors = (row_sums == 0).flatten()
     row_sums[row_sums == 0] = 1
     W = neighbors.astype(float) / row_sums
     M = np.eye(n) - W
     M[no_neighbors, :] = 0
-
-    if no_neighbors.any():
-        n_isolated = no_neighbors.sum()
-        print(
-            f"Warning: {n_isolated} observation(s) have no neighbors within radius {radius}. "
-            f"These observations will be set to 0."
-        )
 
     return M
 
@@ -451,10 +488,10 @@ def transform(
             f"Unknown method: {method}. Use 'nn', 'iso', 'lbmgls', or 'cluster'."
         )
 
-    if data.ndim == 1:
-        return M @ data
-    else:
-        return M @ data
+    out = M @ data
+    if method == "lbmgls":
+        out = out - out.mean(axis=0)
+    return out
 
 
 def get_transformation_stats(
@@ -497,9 +534,9 @@ def get_transformation_stats(
     n = coords.shape[0]
     upper_tri = distmat[np.triu_indices(n, k=1)]
 
-    distmat_no_diag = distmat.copy()
-    np.fill_diagonal(distmat_no_diag, np.inf)
-    nn_distances = np.min(distmat_no_diag, axis=1)
+    distmat_pos = distmat.copy()
+    distmat_pos[distmat_pos <= 0.0] = np.inf
+    nn_distances = np.min(distmat_pos, axis=1)
 
     stats = {
         "n_obs": n,
@@ -514,7 +551,13 @@ def get_transformation_stats(
 
     if method == "iso" and radius is not None:
         stats["radius"] = radius
-        neighbors = (distmat < radius) & (distmat > 0)
+        if latlon:
+            fraction = great_circle_fraction_matrix(coords)
+            neighbors = (fraction <= float(radius) / EARTH_CIRCUMFERENCE_M) & (
+                fraction > 0.0
+            )
+        else:
+            neighbors = (distmat <= radius) & (distmat > 0.0)
         neighbor_counts = neighbors.sum(axis=1)
         stats["n_isolated"] = (neighbor_counts == 0).sum()
         stats["neighbors_mean"] = neighbor_counts.mean()

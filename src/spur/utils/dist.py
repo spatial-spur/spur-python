@@ -6,6 +6,7 @@ from numpy.typing import ArrayLike
 
 
 EARTH_RADIUS_M = 6_371_000.009
+EARTH_CIRCUMFERENCE_M = 2.0 * np.pi * EARTH_RADIUS_M
 
 
 def resolve_spur_coords(
@@ -109,6 +110,22 @@ def haversine_distance(
 
     a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
     return 2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+
+def great_circle_fraction_matrix(coords: np.ndarray) -> np.ndarray:
+    """Compute great-circle distance as a fraction of Earth circumference (arcsin / pi)."""
+    lat = coords[:, 0]
+    lon = coords[:, 1]
+    lat1, lat2 = np.meshgrid(lat, lat, indexing="ij")
+    lon1, lon2 = np.meshgrid(lon, lon, indexing="ij")
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlam = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2) ** 2
+    fraction = np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0))) / np.pi
+    np.fill_diagonal(fraction, 0.0)
+    return fraction
 
 
 def get_distance_matrix(coords: np.ndarray, latlon: bool = True) -> np.ndarray:

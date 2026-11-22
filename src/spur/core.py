@@ -53,6 +53,7 @@ from .utils.matrix import (
     lbmgls_matrix,
     nn_matrix,
     orthonormal_design_basis,
+    validate_and_project_residual_y,
     validate_and_project_y,
     validate_y_variation,
 )
@@ -321,7 +322,11 @@ def _fallback_spur_test(
         else sigma(get_cbar(0.999, distmat))
     )
     r = get_r(sigdm_bm, q)
-    P = validate_and_project_y(y, r)
+    P = (
+        validate_and_project_y(y, r)
+        if design_basis is None
+        else validate_and_project_residual_y(y, r, design_basis)
+    )
     if test_type.startswith("i0"):
         return _fallback_spur_i0(
             test_type, distmat, emat, r, P, sigdm_bm, sigma, tied, fallback_reason
