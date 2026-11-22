@@ -122,7 +122,7 @@ def test_spurhalflife_rejects_identical_coordinates() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match="identical"):
+    with pytest.raises(ValueError, match="distinct locations"):
         spurhalflife("y", df, lon="lon", lat="lat", level=95, q=5, nrep=100, seed=0)
 
 
