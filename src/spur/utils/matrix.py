@@ -27,6 +27,11 @@ def demean_matrix(mat: np.ndarray) -> np.ndarray:
 
 
 def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
+    """Return the retained positive covariance eigenvectors."""
+    return select_spur_basis(sigma, qmax)[0]
+
+
+def select_spur_basis(sigma: np.ndarray, qmax: int) -> tuple[np.ndarray, bool, bool]:
     """
     Get the top qmax eigenvectors of covariance matrix (sorted by eigenvalue desc).
 
@@ -43,8 +48,8 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
 
     Returns
     -------
-    ndarray (n, qmax)
-        Matrix of top eigenvectors
+    tuple of ndarray, bool, bool
+        Retained vectors, whether they contain a tied block, and whether they exhaust positive rank.
     """
     sigma_arr = np.asarray(sigma, dtype=float)
     if sigma_arr.ndim != 2 or sigma_arr.shape[0] != sigma_arr.shape[1]:
@@ -68,13 +73,14 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
         or tail <= 1e-12 * lead
     ):
         raise ValueError(
-            "SPUR covariance basis has insufficient positive rank for requested q."
+            f"SPUR covariance basis has insufficient positive rank for requested q={qmax}. "
+            f"Positive rank is {np.count_nonzero(eigenvalues > 1e-12 * lead)}."
         )
 
     gap_tol = max(1.6e-11 * lead, 8 * np.finfo(float).eps * n)
     if qmax < n and tail - eigenvalues[qmax] <= gap_tol:
         raise ValueError(
-            "Requested q splits a tied eigenspace. Choose q at an eigenvalue gap."
+            f"Requested q splits a tied eigenspace (q={qmax}). Choose q at an eigenvalue gap."
         )
 
     R = eigenvectors[:, :qmax].copy()
@@ -86,7 +92,8 @@ def get_r(sigma: np.ndarray, qmax: int) -> np.ndarray:
         first = np.flatnonzero(maximum - magnitude <= tie_tolerance)[0]
         if col[first] < 0.0:
             col *= -1.0
-    return R
+    tied = bool(np.any(-np.diff(eigenvalues[:qmax]) <= gap_tol))
+    return R, tied, qmax == n or bool(eigenvalues[qmax] <= 1e-12 * lead)
 
 
 def orthonormal_design_basis(x_in: np.ndarray, tol: float = 1e-10) -> np.ndarray:
@@ -205,18 +212,24 @@ def validate_and_project_y(y: np.ndarray, basis_r: np.ndarray) -> np.ndarray:
     return p_vec
 
 
-def residual_constant(design_basis: np.ndarray) -> np.ndarray | None:
+def residual_constant(
+    design_basis: np.ndarray, design: np.ndarray
+) -> np.ndarray | None:
     """Check constant span and return its residual when larger than roundoff."""
     n = design_basis.shape[0]
     constant = np.full(n, 1.0 / np.sqrt(n))
     for _ in range(2):
         constant -= design_basis @ (design_basis.T @ constant)
-    # Squared norm bounds the fraction of the constant covariance left by projection.
     eps = np.finfo(float).eps
-    norm_sq = float(constant @ constant)
-    if norm_sq > eps:
+    residual_norm = np.linalg.norm(constant)
+    if residual_norm <= 8 * eps:
+        return None
+    scaled = design / np.max(np.abs(design), axis=0)
+    u, s, _ = np.linalg.svd(scaled, full_matrices=False)
+    coeff_norm = np.linalg.norm(u.sum(axis=0) / (np.sqrt(n) * s))
+    if residual_norm > 64 * eps * (1 + s[0] * coeff_norm):
         raise ValueError("SPUR residual tests require a design that spans a constant.")
-    return None if norm_sq <= (8 * eps) ** 2 else constant * np.sqrt(n)
+    return constant * np.sqrt(n)
 
 
 def validate_and_project_residual_y(
@@ -363,8 +376,8 @@ def iso_matrix(coords: np.ndarray, radius: float, latlon: bool = True) -> np.nda
     """
     Compute isotropic transformation matrix.
 
-    For each observation, identifies all distinct-location neighbors within
-    the specified inclusive radius (`0 < d <= radius`) and creates a
+    For each observation, identifies all other observations strictly within
+    the specified radius (`d < radius`), including co-located observations, and creates a
     row-normalized weight matrix. The transformation matrix is I - W, which
     differences each observation from the average of its neighbors.
 
@@ -394,12 +407,10 @@ def iso_matrix(coords: np.ndarray, radius: float, latlon: bool = True) -> np.nda
     n = coords.shape[0]
     if latlon:
         fraction = great_circle_fraction_matrix(coords)
-        neighbors = (fraction <= float(radius) / EARTH_CIRCUMFERENCE_M) & (
-            fraction > 0.0
-        )
+        neighbors = fraction < float(radius) / EARTH_CIRCUMFERENCE_M
     else:
-        distmat = get_distance_matrix(coords, latlon=False)
-        neighbors = (distmat <= radius) & (distmat > 0.0)
+        neighbors = get_distance_matrix(coords, latlon=False) < radius
+    np.fill_diagonal(neighbors, False)
     row_sums = neighbors.sum(axis=1, keepdims=True).astype(float)
     no_neighbors = (row_sums == 0).flatten()
     row_sums[row_sums == 0] = 1

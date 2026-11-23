@@ -133,6 +133,7 @@ def test_half_life_continuous_inversion_against_three_site_reference(monkeypatch
         assert result.ci_lower == 0.0
         assert result.ci_upper == pytest.approx(7.4073897366, abs=0.25)
         assert result.components.shape == (1, 2)
+        assert result.pv_mat is not None
         assert result.pv_mat[-1] < 0.05
 
 

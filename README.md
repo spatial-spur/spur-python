@@ -156,9 +156,11 @@ This development branch requires the matching `scpc-python` checkout at version
 `uv sync --locked` from `spur-python`. This setup supports the pure-Python backend.
 
 For Rust, install the native adapter from the matching sibling `spatial-rust`
-checkout. The adapter must provide SPUR API 5, SCPC API 7, and methods spec
-0.3.8 or newer.
+checkout. The adapter must provide SPUR API 6, SCPC API 7, and methods spec
+0.3.9 or newer.
 
 ```bash
 uv pip install ../spatial-rust/crates/spatial-py
 ```
+
+SPUR diagnostics report the best simulated tuning power when the 50% target is out of reach. They identify nominal levels that the requested simulation count cannot attain. A fit using every positive direction or at least 40 components gives a high-frequency sensitivity advisory. Half-life inference flags limited information at 2–5 components and currently supports up to 100 components with its five-node quadrature.

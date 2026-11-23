@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 import importlib
 from dataclasses import dataclass
 import os
+import warnings
 from typing import Any, Literal, Optional
 
 import numpy as np
@@ -35,7 +36,7 @@ from .utils.formula import (
     parse_single_var_formula,
 )
 from .utils.inference import (
-    get_ha_param_i0,
+    fit_spur_i0,
     fit_spur_i1,
     monte_carlo_cutoffs,
     precision_factor,
@@ -45,7 +46,7 @@ from .utils.matrix import (
     cholesky_upper,
     demean_clusters,
     demean_matrix,
-    get_r,
+    select_spur_basis,
     get_sigma_lbm,
     iso_matrix,
     lbmgls_matrix,
@@ -59,8 +60,8 @@ from .utils.matrix import (
 
 VALID_BACKENDS = {"auto", "rust", "fallback"}
 RUST_API_VERSION = 7
-SPUR_RUST_API_VERSION = 5
-RUST_MIN_SPEC_VERSION = (0, 3, 8)
+SPUR_RUST_API_VERSION = 6
+RUST_MIN_SPEC_VERSION = (0, 3, 9)
 
 
 def _different_covariance_shapes(a: np.ndarray, b: np.ndarray) -> bool:
@@ -126,7 +127,7 @@ def _require_rust_if_requested(resolved_backend: str) -> Any | None:
         raise RuntimeError(
             "Rust backend requested, but a compatible `spatial_spur_rust` is unavailable. "
             f"Build the matching development adapter with SPUR API {SPUR_RUST_API_VERSION} "
-            f"and SCPC API {RUST_API_VERSION}, with methods spec 0.3.8 or newer."
+            f"and SCPC API {RUST_API_VERSION}, with methods spec 0.3.9 or newer."
         )
     return rust_mod
 
@@ -173,6 +174,8 @@ def _test_result_from_rust(
         rho_grid=rho_grid,
         backend="rust",
         tied=bool(rust_res["tied"]),
+        all_directions=bool(rust_res["all_directions"]),
+        best_tuning_power=rust_res["best_tuning_power"],
     )
 
 
@@ -231,7 +234,73 @@ def _fallback_reason(backend: str) -> str | None:
     return "missing_or_incompatible_native_extension" if backend == "auto" else None
 
 
-def _validate_test_dimensions(q: int, nrep: int, n: int, n_regressors: int = 0) -> None:
+def _site_summary(distances: np.ndarray) -> str:
+    n = len(distances)
+    sites = sum(not np.any(row[:i] == 0) for i, row in enumerate(distances))
+    floor = (np.count_nonzero(distances == 0) - n) / (n * (n - 1))
+    return f"{sites} distinct locations, co-located-pair fraction {floor:.6f}."
+
+
+def _basis_for_sites(
+    sigma: np.ndarray, distances: np.ndarray, q: int
+) -> tuple[np.ndarray, bool, bool]:
+    try:
+        return select_spur_basis(sigma, q)
+    except ValueError as exc:
+        raise ValueError(f"{exc} {_site_summary(distances)}") from exc
+
+
+def _warn_spur_inference(
+    q: int,
+    nrep: int,
+    tests: list[TestResult],
+    *,
+    level: float | None = None,
+    all_directions: bool = False,
+) -> None:
+    notes = []
+    all_directions = all_directions or any(t.all_directions for t in tests)
+    if q >= 40 or all_directions:
+        scope = " uses all positive directions and" if all_directions else ""
+        notes.append(
+            f"q={q}{scope} retains higher spatial frequencies. Results can be sensitive to local noise."
+        )
+    if level is None:
+        unattainable = [f"{alpha}%" for alpha in (1, 5, 10) if nrep + 1 < 100 // alpha]
+        if unattainable:
+            notes.append(
+                f"With nrep={nrep}, the minimum p-value is {1 / (nrep + 1):.4g}. Rejection is unattainable at {', '.join(unattainable)}."
+            )
+        for test in tests:
+            if test.best_tuning_power is not None:
+                notes.append(
+                    f"{test.test_type} did not reach the 50% tuning target. The best estimated power was {test.best_tuning_power:.1%}."
+                )
+    else:
+        if q <= 5:
+            notes.append(
+                f"q={q} provides few spatial contrasts for estimating the half-life."
+            )
+        if nrep / (nrep + 1) < level / 100:
+            notes.append(
+                f"With nrep={nrep}, the minimum p-value is {1 / (nrep + 1):.4g}. The {level:g}% confidence set necessarily covers [0, infinity]."
+            )
+    if notes:
+        warnings.warn(" ".join(notes), UserWarning, stacklevel=3)
+
+
+def _validate_test_dimensions(
+    q: int, nrep: int, n: int, n_regressors: int = 0
+) -> tuple[int, int]:
+    for name, value in (("q", q), ("nrep", nrep)):
+        if isinstance(value, (bool, np.bool_)) or not (
+            isinstance(value, (int, np.integer))
+            or isinstance(value, (float, np.floating))
+            and np.isfinite(value)
+            and float(value).is_integer()
+        ):
+            raise ValueError(f"{name}={value} must be a finite integer.")
+    q, nrep = int(q), int(nrep)
     if q >= n:
         raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
     if q < 2:
@@ -240,6 +309,7 @@ def _validate_test_dimensions(q: int, nrep: int, n: int, n_regressors: int = 0) 
         raise ValueError(f"nrep={nrep} must be >= 1.")
     if q > n - n_regressors:
         raise ValueError(f"q={q} exceeds the residual dimension {n - n_regressors}.")
+    return q, nrep
 
 
 def _run_spur_test(
@@ -255,7 +325,9 @@ def _run_spur_test(
     *,
     x_in: np.ndarray | None = None,
 ) -> TestResult:
-    _validate_test_dimensions(q, nrep, len(y), 0 if x_in is None else x_in.shape[1])
+    q, nrep = _validate_test_dimensions(
+        q, nrep, len(y), 0 if x_in is None else x_in.shape[1]
+    )
     emat = _draw_emat(seed, 2 * q, nrep)
     rust_res = _try_rust_spur_test(
         test_type,
@@ -270,18 +342,19 @@ def _run_spur_test(
         x_in=x_in,
     )
     if rust_res is not None:
+        _warn_spur_inference(q, nrep, [rust_res])
         return rust_res
-    design_basis = None if x_in is None else orthonormal_design_basis(x_in)
     distmat = normalized_distmat(coords, latlon=latlong)
-    basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
-    return _fallback_spur_test(
+    basis = _prepare_fallback_spur_basis(y, distmat, q, x_in)
+    result = _fallback_spur_test(
         test_type,
         distmat,
         emat,
         basis,
-        tied=False,
         fallback_reason=_fallback_reason(backend),
     )
+    _warn_spur_inference(q, nrep, [result])
+    return result
 
 
 @dataclass(slots=True)
@@ -289,25 +362,28 @@ class _FallbackSpurBasis:
     response: np.ndarray
     brownian: np.ndarray
     omega: Callable[[float], np.ndarray]
+    tied: bool
+    all_directions: bool
 
 
 def _prepare_fallback_spur_basis(
     y: np.ndarray,
     distmat: np.ndarray,
     q: int,
-    design_basis: np.ndarray | None,
+    design: np.ndarray | None,
 ) -> _FallbackSpurBasis:
-    if design_basis is None:
+    if design is None:
         sigma_bm = demean_matrix(get_sigma_lbm(distmat))
-        r = get_r(sigma_bm, q)
+        r, tied, all_directions = _basis_for_sites(sigma_bm, distmat, q)
         projected = r - r.mean(axis=0)
         response = validate_and_project_y(y, r)
     else:
-        constant = residual_constant(design_basis)
+        design_basis = orthonormal_design_basis(design)
+        constant = residual_constant(design_basis, design)
         sigma_bm = -0.5 * distmat
         sigma_bm -= design_basis @ (design_basis.T @ sigma_bm)
         sigma_bm -= (sigma_bm @ design_basis) @ design_basis.T
-        r = get_r(sigma_bm, q)
+        r, tied, all_directions = _basis_for_sites(sigma_bm, distmat, q)
         projected = r - design_basis @ (design_basis.T @ r)
         response = validate_and_project_residual_y(y, r, design_basis, constant)
 
@@ -322,7 +398,9 @@ def _prepare_fallback_spur_basis(
         return 0.5 * (covariance + covariance.T)
 
     brownian = r.T @ (sigma_bm @ r)
-    return _FallbackSpurBasis(response, 0.5 * (brownian + brownian.T), omega)
+    return _FallbackSpurBasis(
+        response, 0.5 * (brownian + brownian.T), omega, tied, all_directions
+    )
 
 
 def _fallback_spur_test(
@@ -331,11 +409,10 @@ def _fallback_spur_test(
     emat: np.ndarray,
     basis: _FallbackSpurBasis,
     *,
-    tied: bool,
     fallback_reason: str | None,
 ) -> TestResult:
     run = _fallback_spur_i0 if test_type.startswith("i0") else _fallback_spur_i1
-    return run(test_type, distmat, emat, basis, tied, fallback_reason)
+    return run(test_type, distmat, emat, basis, fallback_reason)
 
 
 def _fallback_spur_i0(
@@ -343,7 +420,6 @@ def _fallback_spur_i0(
     distmat: np.ndarray,
     emat: np.ndarray,
     basis: _FallbackSpurBasis,
-    tied: bool,
     fallback_reason: str | None,
 ) -> TestResult:
     emat, tuning = np.split(emat, 2, axis=0)
@@ -353,7 +429,8 @@ def _fallback_spur_i0(
     )
     if floor > 0.03:
         raise ValueError(
-            "I(0) null requires a co-located-pair fraction at or below 0.03."
+            "I(0) null requires a co-located-pair fraction at or below 0.03. "
+            + _site_summary(distmat)
         )
     om_rho = basis.omega(get_cbar(0.001, distmat) if floor < 0.001 else np.inf)
     om_bm = basis.brownian
@@ -364,7 +441,7 @@ def _fallback_spur_i0(
 
     om_i0 = om_rho
     om_ho = om_rho
-    ha_parm = get_ha_param_i0(om_ho, om_i0, om_bm, tuning)
+    ha_parm, best_power = fit_spur_i0(om_ho, om_i0, om_bm, tuning)
     om_ha = om_i0 + ha_parm * om_bm
 
     ch_omi_ho = precision_factor(np.linalg.cholesky(om_ho))
@@ -410,7 +487,9 @@ def _fallback_spur_i0(
         cvalue_mat=cvalue_mat,
         rho_grid=rho_grid,
         backend="fallback",
-        tied=tied,
+        tied=basis.tied,
+        all_directions=basis.all_directions,
+        best_tuning_power=best_power,
         fallback_reason=fallback_reason,
     )
 
@@ -420,14 +499,13 @@ def _fallback_spur_i1(
     distmat: np.ndarray,
     emat: np.ndarray,
     basis: _FallbackSpurBasis,
-    tied: bool,
     fallback_reason: str | None,
 ) -> TestResult:
     emat, tuning = np.split(emat, 2, axis=0)
     P = basis.response
     om_ho = basis.brownian
 
-    ha_parm, om_ha = fit_spur_i1(om_ho, distmat, tuning, basis.omega)
+    ha_parm, om_ha, best_power = fit_spur_i1(om_ho, distmat, tuning, basis.omega)
     ch_om_ho = np.linalg.cholesky(om_ho)
     ch_omi_ho = precision_factor(ch_om_ho)
     ch_omi_ha = precision_factor(np.linalg.cholesky(om_ha))
@@ -451,7 +529,9 @@ def _fallback_spur_i1(
         cv=cv_vec,
         ha_param=ha_parm,
         backend="fallback",
-        tied=tied,
+        tied=basis.tied,
+        all_directions=basis.all_directions,
+        best_tuning_power=best_power,
         fallback_reason=fallback_reason,
     )
 
@@ -899,6 +979,12 @@ def spurtest(
     raise ValueError("`test` must be one of 'i0', 'i1', 'i0resid', 'i1resid'.")
 
 
+def _apply_lbm_transform(matrix: np.ndarray, values: np.ndarray) -> np.ndarray:
+    centered = demean_clusters(values, np.zeros(len(values), dtype=int))
+    transformed = matrix @ centered
+    return transformed - transformed.mean(axis=0)
+
+
 def spurtransform(
     formula: str,
     data: pd.DataFrame,
@@ -921,8 +1007,8 @@ def spurtransform(
 
     Nearest-neighbor differencing averages the observations tied at the
     smallest positive distance. It requires at least two distinct locations.
-    Isotropic differencing averages neighbors at positive distances up to and
-    including the radius. Observations with no such neighbors transform to zero.
+    Isotropic differencing averages other observations strictly within the radius,
+    including observations at the same site. An isolated observation transforms to zero.
     LBM-GLS centers each transformed column.
 
     Args:
@@ -1065,9 +1151,10 @@ def spurtransform(
         else:
             M = lbmgls_matrix(coords_raw, latlon=latlon)
 
-        transformed = M @ values
         if transformation == "lbmgls":
-            transformed -= transformed.mean(axis=0)
+            transformed = _apply_lbm_transform(M, values)
+        else:
+            transformed = M @ values
 
     df = data.copy()
     for var, column in zip(variables.columns, transformed.T, strict=True):
@@ -1112,7 +1199,7 @@ def spurhalflife(
     coords_euclidean : sequence of str, optional
         Euclidean coordinate column names
     q : int, default 15
-        Number of low-frequency weights
+        Number of low-frequency weights, from 2 through 100 for half-life quadrature.
     nrep : int, default 100000
         Monte Carlo draws
     level : float, default 95
@@ -1135,10 +1222,11 @@ def spurhalflife(
         raise ValueError(f"Variable '{var}' not found in data.")
     if not (0 < level < 100):
         raise ValueError(f"level={level} must be strictly between 0 and 100.")
-    if q < 2:
-        raise ValueError(f"q={q} must be >= 2 for informative SPUR inference.")
-    if nrep < 1:
-        raise ValueError(f"nrep={nrep} must be >= 1.")
+    q, nrep = _validate_test_dimensions(q, nrep, len(data))
+    if q > 100:
+        raise ValueError(
+            f"q={q} exceeds the validated half-life quadrature limit of 100."
+        )
 
     Y = data[var].to_numpy(dtype=float)
     if not np.all(np.isfinite(Y)):
@@ -1157,10 +1245,6 @@ def spurhalflife(
     resolved_nthreads = validate_nthreads(nthreads)
     coords = coord_info["coords"]
     latlon = coord_info["latlong"]
-    n = coords.shape[0]
-    if q >= n:
-        raise ValueError(f"q={q} must be less than n={n}. Use q <= {n - 1}.")
-
     emat = _draw_emat(seed, q, nrep)
 
     rust_mod = _require_rust_if_requested(resolved_backend)
@@ -1182,21 +1266,27 @@ def spurhalflife(
         pvalues = np.asarray(rust_res["pv_mat"], dtype=float).ravel()
         h_grid = np.asarray(rust_res["hl_grid_ho"], dtype=float).ravel()
         tied = bool(rust_res["tied"])
+        all_directions = bool(rust_res["all_directions"])
     else:
         distmat_raw = get_distance_matrix(coords, latlon=latlon)
         max_dist = float(distmat_raw.max())
         if not np.isfinite(max_dist) or max_dist <= 0.0:
             raise ValueError(
-                "Half-life inference requires at least two distinct locations."
+                "Half-life inference requires at least two distinct locations (1 distinct location, co-located-pair fraction 1)."
             )
-        components, pvalues, h_grid = spur_persistence(
-            Y, distmat_raw / max_dist, emat, level / 100
+        distances = distmat_raw / max_dist
+        r, tied, all_directions = _basis_for_sites(
+            demean_matrix(-0.5 * distances), distances, q
         )
-        tied = False
+        components, pvalues, h_grid = spur_persistence(
+            Y, distances, emat, level / 100, basis=r
+        )
 
     if not normdist:
         components = components * max_dist
+    _warn_spur_inference(q, nrep, [], level=level, all_directions=all_directions)
     return HalfLifeResult(
+        all_directions=all_directions,
         ci_lower=float(components[0, 0]) if components.size else np.nan,
         ci_upper=float(components[-1, 1]) if components.size else np.nan,
         max_dist=max_dist,
@@ -1291,8 +1381,7 @@ def spur(
     intercept_slice = intercept_columns(fitted.data)
     if intercept_slice is None:
         raise ValueError("spur() requires a formula with an intercept.")
-    design_basis = orthonormal_design_basis(x) if rust_mod is None else None
-    _validate_test_dimensions(q, nrep, len(sample), x.shape[1])
+    q, nrep = _validate_test_dimensions(q, nrep, len(sample), x.shape[1])
 
     coord_info = resolve_spur_coords(
         data=sample,
@@ -1327,10 +1416,8 @@ def spur(
     distmat = None if use_native else normalized_distmat(coords, latlon=latlong)
     if not use_native:
         assert distmat is not None
-        if design_basis is None:
-            design_basis = orthonormal_design_basis(x)
         levels_basis = _prepare_fallback_spur_basis(y, distmat, q, None)
-        residual_basis = _prepare_fallback_spur_basis(y, distmat, q, design_basis)
+        residual_basis = _prepare_fallback_spur_basis(y, distmat, q, x)
     levels_model = fitted.fit()
     fallback_reason = _fallback_reason(backend)
     stage_backends: dict[str, str] = {}
@@ -1338,7 +1425,6 @@ def spur(
     tests: dict[str, TestResult] = {}
     for test_type in test_types:
         stage = None if native is None else native[test_type]
-        tied = stage is not None and bool(stage["tied"])
         if use_native:
             assert stage is not None
             result = _test_result_from_rust(
@@ -1351,7 +1437,6 @@ def spur(
                 distmat,
                 emat,
                 residual_basis if test_type.endswith("resid") else levels_basis,
-                tied=tied,
                 fallback_reason=fallback_reason,
             )
         tests[test_type] = result
@@ -1365,8 +1450,9 @@ def spur(
         stage_backends["transform"] = "rust"
     else:
         assert distmat is not None
-        transformed = lbmgls_matrix_from_distances(distmat) @ transform_input
-        transformed -= transformed.mean(axis=0)
+        transformed = _apply_lbm_transform(
+            lbmgls_matrix_from_distances(distmat), transform_input
+        )
         stage_backends["transform"] = "fallback"
         if fallback_reason is not None:
             fallback_reasons["transform"] = fallback_reason
@@ -1420,6 +1506,7 @@ def spur(
         if result.fallback_reason is not None:
             fallback_reasons[stage] = result.fallback_reason
 
+    _warn_spur_inference(q, nrep, list(tests.values()))
     return PipelineResult(
         tests=Tests(tests["i0"], tests["i1"], tests["i0resid"], tests["i1resid"]),
         fits=Fits(levels=fits["levels_scpc"], transformed=fits["transformed_scpc"]),

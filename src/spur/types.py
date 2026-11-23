@@ -28,6 +28,12 @@ class TestResult:
     """Optional null-grid rho values when computed."""
     backend: str = field(default="fallback", repr=False, compare=False)
     """Execution backend used to compute this result."""
+    best_tuning_power: float | None = field(
+        default=None, repr=False, compare=False, kw_only=True
+    )
+    """Highest independent power estimate if the 50% tuning target was missed."""
+    all_directions: bool = field(default=False, repr=False, compare=False, kw_only=True)
+    """Whether q exhausts the numerically positive covariance directions."""
     tied: bool = field(default=False, repr=False, compare=False)
     """Whether the eigenspace cutoff exhibited numerical ties."""
 
@@ -70,6 +76,8 @@ class HalfLifeResult:
     """Initial half-life search points in sample-diameter units."""
     backend: str = field(default="fallback", repr=False, compare=False)
     """Execution backend used to compute this result."""
+    all_directions: bool = field(default=False, repr=False, compare=False, kw_only=True)
+    """Whether q exhausts the numerically positive covariance directions."""
     tied: bool = field(default=False, repr=False, compare=False)
     """Whether the native solver reported a tie inside the retained basis."""
 

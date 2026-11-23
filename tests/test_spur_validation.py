@@ -142,7 +142,7 @@ def test_residual_tests_require_the_constant_direction(backend: str) -> None:
         ),
     ],
 )
-def test_spurtransform_geographic_iso_includes_exact_radius(
+def test_spurtransform_geographic_iso_excludes_exact_radius(
     backend: str, site1: tuple[float, float], site2: tuple[float, float], capsys
 ) -> None:
     lat1, lon1 = site1
@@ -153,9 +153,11 @@ def test_spurtransform_geographic_iso_includes_exact_radius(
         lon="lon", lat="lat", transformation="iso", backend=backend
     )
 
-    inclusive = spurtransform("y ~ 1", data, radius=radius, **opts)
+    boundary = spurtransform("y ~ 1", data, radius=radius, **opts)
+    inside = spurtransform("y ~ 1", data, radius=radius * (1.0 + 1e-12), **opts)
     outside = spurtransform("y ~ 1", data, radius=radius * (1.0 - 1e-12), **opts)
-    np.testing.assert_array_equal(inclusive["h_y"], [-3.0, 3.0])
+    np.testing.assert_array_equal(boundary["h_y"], 0.0)
+    np.testing.assert_array_equal(inside["h_y"], [-3.0, 3.0])
     np.testing.assert_array_equal(outside["h_y"], 0.0)
     assert capsys.readouterr().out == ""
 

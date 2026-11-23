@@ -156,6 +156,8 @@ def test_spur_preserves_simple_transformed_formula_and_records_stage_backends(
         "cvalue_mat": [[1.0, 2.0, 3.0]],
         "rho_grid": [0.001],
         "tied": False,
+        "best_tuning_power": None,
+        "all_directions": False,
     }
 
     def fake_pipeline(*args, **kwargs):

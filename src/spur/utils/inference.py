@@ -56,7 +56,7 @@ def fit_spur_i1(
     distmat: np.ndarray,
     e: np.ndarray,
     covariance: Callable[[float], np.ndarray],
-) -> tuple[float, np.ndarray]:
+) -> tuple[float, np.ndarray, float | None]:
     """Tune the I(1) alternative on the independent draws."""
     floor = np.count_nonzero(distmat == 0.0) - len(distmat)
     floor /= len(distmat) * (len(distmat) - 1)
@@ -78,20 +78,26 @@ def fit_spur_i1(
     for _ in range(199):
         if power <= 0.5:
             break
+        upper, high_cov = lower, low_cov
         lower *= 0.5
-        power = get_pow_qf(om_ho, covariance(lower), e)
+        low_cov = covariance(lower)
+        power = get_pow_qf(om_ho, low_cov, e)
     if power > 0.5:
         raise RuntimeError("SPUR I(1) step-1 bracketing did not converge.")
 
+    if power == 0.5:
+        return lower, low_cov, None
+    best_rate, best_cov, best_power = lower, low_cov, power
     omega = high_cov
     power = get_pow_qf(om_ho, omega, e)
     rate = upper
-    best_rate, best_cov, best_power = rate, omega, power
+    if power > best_power:
+        best_rate, best_cov, best_power = rate, omega, power
     for _ in range(199):
         if power >= 0.5:
             break
         if np.exp(-upper * min_distance) == 0:
-            return best_rate, best_cov
+            return best_rate, best_cov, float(best_power)
         upper *= 2
         rate = upper
         omega = covariance(rate)
@@ -99,7 +105,7 @@ def fit_spur_i1(
         if power > best_power:
             best_rate, best_cov, best_power = rate, omega, power
     if power < 0.5:
-        return best_rate, best_cov
+        return best_rate, best_cov, float(best_power)
 
     for _ in range(20):
         if abs(power - 0.5) <= 0.01:
@@ -111,7 +117,7 @@ def fit_spur_i1(
             upper = rate
         else:
             lower = rate
-    return rate, omega
+    return rate, omega, None
 
 
 def precision_factor(lower: np.ndarray) -> np.ndarray:
@@ -134,6 +140,12 @@ def get_ha_param_i0(
     """
     Find alternative hypothesis parameter g that yields ~50% power for I(0) test.
     """
+    return fit_spur_i0(om_ho, om_i0, om_bm, e)[0]
+
+
+def fit_spur_i0(
+    om_ho: np.ndarray, om_i0: np.ndarray, om_bm: np.ndarray, e: np.ndarray
+) -> tuple[float, float | None]:
     pow_ = 1.0
     gtry = 1.0
     _MAX_BRACKET = 200
@@ -148,21 +160,29 @@ def get_ha_param_i0(
             raise RuntimeError(
                 f"get_ha_param_i0: step-1 bracketing did not converge in {_MAX_BRACKET} iterations."
             )
+    if pow_ == 0.5:
+        return g, None
     g1 = g
 
+    best_param, best_power = g, pow_
+    limit_shape = om_bm / np.trace(om_bm)
     pow_ = 0.0
-    gtry = 30.0
-    best_param, best_power = g, -1.0
+    gtry = 2 * g1 if _iter > 1 else 30.0
     _iter = 0
     while pow_ < 0.5:
         g = gtry
-        pow_ = get_pow_qf(om_ho, om_i0 + g * om_bm, e)
+        mixture = om_i0 + g * om_bm
+        pow_ = get_pow_qf(om_ho, mixture, e)
         gtry = g * 2
         if pow_ > best_power:
             best_param, best_power = g, pow_
         _iter += 1
-        if _iter >= _MAX_BRACKET and pow_ < 0.5:
-            return best_param
+        if pow_ < 0.5 and (
+            _iter >= _MAX_BRACKET
+            or np.max(np.abs(mixture / np.trace(mixture) - limit_shape))
+            <= 8 * np.finfo(float).eps
+        ):
+            return best_param, float(best_power)
     g2 = g
 
     ii = 1
@@ -178,7 +198,7 @@ def get_ha_param_i0(
         if ii > 20:
             break
 
-    return g
+    return g, None
 
 
 def get_ha_param_i1_residual(
@@ -271,12 +291,21 @@ def _invert_half_life(grid, accepted, accepts) -> np.ndarray:
 
 
 def spur_persistence(
-    y: np.ndarray, distmat: np.ndarray, emat: np.ndarray, level: float
+    y: np.ndarray,
+    distmat: np.ndarray,
+    emat: np.ndarray,
+    level: float,
+    *,
+    basis: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Numerically invert the half-life rank tests in sample-diameter units."""
     q, nrep = emat.shape
-    brownian = demean_matrix(-0.5 * distmat)
-    basis = get_r(brownian, q)
+    if q > 100:
+        raise ValueError(
+            f"q={q} exceeds the validated half-life quadrature limit of 100."
+        )
+    if basis is None:
+        basis = get_r(demean_matrix(-0.5 * distmat), q)
     projected = basis - basis.mean(axis=0)
     observed = validate_and_project_y(y, basis)
 
@@ -347,8 +376,9 @@ def spur_persistence(
     components = _invert_half_life(
         grid,
         accepted,
-        lambda t: (nrep - exceedances(covariance(_compact_to_half_life(t))))
-        / (nrep + 1)
-        < level,
+        lambda t: (
+            (nrep - exceedances(covariance(_compact_to_half_life(t)))) / (nrep + 1)
+            < level
+        ),
     )
     return components, (1 + counts) / (nrep + 1), h_grid

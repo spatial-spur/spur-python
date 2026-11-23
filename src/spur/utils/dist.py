@@ -181,7 +181,7 @@ def normalized_distmat(coords: np.ndarray, latlon: bool = True) -> np.ndarray:
     max_dist = float(distmat.max())
     if not np.isfinite(max_dist) or max_dist <= 0.0:
         raise ValueError(
-            "All coordinates are identical; distance normalization "
+            "All coordinates are identical (1 distinct location, co-located-pair fraction 1); distance normalization "
             "requires distinct locations."
         )
     return distmat / max_dist

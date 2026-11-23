@@ -19,25 +19,28 @@ RUST_PARAMETER = pytest.param(
 
 
 @pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
-def test_nearly_constant_design_preserves_residual_inference(backend):
+def test_only_a_constant_spanning_design_supports_residual_inference(backend):
     s = np.linspace(0.0, 1.0, 60)
-    x = 1.0 + 1e-8 * s
-    y = np.random.default_rng(123).normal(size=s.size)
+    data = pd.DataFrame(
+        dict(
+            s=np.random.default_rng(812).uniform(size=s.size),
+            trend=s,
+            near=1 + 1e-8 * s,
+            a=1 + 1e6 * s,
+            b=-1e6 * s,
+            y=np.random.default_rng(123).normal(size=s.size),
+        )
+    )
     opts: dict[str, Any] = dict(
-        coords_euclidean=["s"], q=8, nrep=3000, seed=42, nthreads=1
+        coords_euclidean=["s"], q=8, nrep=199, seed=42, nthreads=1, backend=backend
     )
     for test in (spur.spurtest_i0resid, spur.spurtest_i1resid):
-        base = test(
-            "y ~ 0 + x", pd.DataFrame(dict(y=y, s=s, x=x)), backend=backend, **opts
-        )
-        shifted = test(
-            "y ~ 0 + x",
-            pd.DataFrame(dict(y=y + 1e9 * x, s=s, x=x)),
-            backend=backend,
-            **opts,
-        )
-        assert shifted.LR == pytest.approx(base.LR, rel=1e-6)
-        assert shifted.pvalue == base.pvalue
+        with pytest.raises(ValueError, match="spans a constant"):
+            test("y ~ 0 + near", data, **opts)
+        result = test("y ~ 0 + a + b", data, **opts)
+        reference = test("y ~ trend", data, **opts)
+        assert result.LR == pytest.approx(reference.LR, rel=1e-8)
+        assert result.pvalue == reference.pvalue
 
 
 @pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
@@ -50,7 +53,9 @@ def test_residual_inference_agrees_across_equivalent_large_offset_designs(backen
             "y": 1e13 + 0.25 * rng.integers(-12, 13, size=36),
         }
     )
-    opts = dict(coords_euclidean=["s"], q=4, nrep=499, seed=42, backend=backend)
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["s"], q=4, nrep=499, seed=42, backend=backend
+    )
     for test in (spur.spurtest_i0resid, spur.spurtest_i1resid):
         baseline = test("y ~ C(g)", data, **opts)
         all_indicators = test("y ~ 0 + C(g)", data, **opts)
@@ -62,7 +67,9 @@ def test_residual_inference_agrees_across_equivalent_large_offset_designs(backen
 def test_i0_and_i1_calibrate_over_attainable_colocated_covariances(backend):
     sites = np.array([0.0, 0.0, 0.04, 0.17, 0.19, 0.25, 0.42, 0.6, 0.78, 1.0])
     data = pd.DataFrame({"s": sites, "y": np.sin(7 * sites)})
-    opts = dict(coords_euclidean=["s"], q=2, nrep=199, seed=17, backend=backend)
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["s"], q=2, nrep=199, seed=17, backend=backend
+    )
     i0 = spur.spurtest_i0("y", data, **opts)
     assert i0.rho_grid is not None
     assert i0.rho_grid[0] == pytest.approx(1 / 45)
@@ -185,7 +192,7 @@ def test_power_calibration_returns_best_trial_when_target_is_unreachable(monkeyp
     monkeypatch.setattr(inference, "get_pow_qf", lambda *args: 0.0)
     assert (
         inference.get_ha_param_i0(np.eye(2), np.eye(2), np.eye(2), np.ones((2, 3)))
-        == 30.0
+        == 1.0
     )
 
 
@@ -238,7 +245,7 @@ def test_zero_projected_signal_is_rejected(backend):
         )
 
 
-@pytest.mark.parametrize("spur_api, spec", [(4, "0.3.8"), (5, "0.3.7")])
+@pytest.mark.parametrize("spur_api, spec", [(5, "0.3.9"), (6, "0.3.8")])
 def test_incompatible_spur_extension_uses_fallback(monkeypatch, spur_api, spec):
     from types import SimpleNamespace
     import importlib
@@ -262,7 +269,7 @@ def test_incompatible_spur_extension_uses_fallback(monkeypatch, spur_api, spec):
     )
     assert spur_core.load_rust_backend() is None
     if getattr(scpc_core, "RUST_API_VERSION", None) == 7:
-        assert scpc_core.load_rust_backend() is (stale if spur_api == 4 else None)
+        assert scpc_core.load_rust_backend() is (stale if spec == "0.3.9" else None)
 
     rng = np.random.default_rng(788)
     d = pd.DataFrame(rng.normal(size=(12, 3)), columns=["y", "sx", "sy"])
@@ -273,7 +280,7 @@ def test_incompatible_spur_extension_uses_fallback(monkeypatch, spur_api, spec):
     result = spur.spurtest_i0resid("y ~ x", d, q=10, backend="auto", **opts)
     assert result.backend == "fallback"
     assert result.fallback_reason == "missing_or_incompatible_native_extension"
-    with pytest.raises(RuntimeError, match="SPUR API 5"):
+    with pytest.raises(RuntimeError, match="SPUR API 6"):
         spur.spurtest_i0resid("y ~ x", d, q=10, backend="rust", **opts)
     with pytest.raises(ValueError, match="residual dimension"):
         spur.spurtest_i0resid("y ~ x", d, q=11, backend="auto", **opts)
@@ -364,4 +371,89 @@ def test_tiny_coordinate_scale_invariance(backend):
     )
     np.testing.assert_allclose(
         tr_tiny["h_y"].to_numpy(), tr_orig["h_y"].to_numpy(), rtol=1e-9, atol=1e-9
+    )
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_spur_dimension_and_rank_diagnostics(backend):
+    import warnings
+
+    rng = np.random.default_rng(1043)
+    d = pd.DataFrame(rng.normal(size=(45, 3)), columns=["sx", "sy", "y"])
+    opts: dict[str, Any] = dict(
+        coords_euclidean=["sx", "sy"], seed=31, backend=backend, nthreads=1
+    )
+    invalid_inputs: list[tuple[Any, Any]] = [(2.5, 99), (np.nan, 99), (5, 12.5)]
+    for dimension, count in invalid_inputs:
+        with pytest.raises(ValueError, match="finite integer"):
+            spur.spurtest_i1("y", d, q=dimension, nrep=count, **opts)
+    with pytest.warns(UserWarning, match="higher spatial frequencies") as caught:
+        res = spur.spurtest_i1("y", d, q=40, nrep=18, **opts)
+    assert len(caught) == 1
+    assert "unattainable at 1%, 5%" in str(caught[0].message)
+    assert not res.all_directions
+    with pytest.warns(UserWarning, match="few spatial contrasts") as caught:
+        result = spur.spurhalflife("y", d, q=5, nrep=18, level=95, **opts)
+    assert len(caught) == 1 and "necessarily covers" in str(caught[0].message)
+    np.testing.assert_array_equal(result.components, [[0.0, np.inf]])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        spur.spurhalflife("y", d, q=5, nrep=19, level=95, **opts)
+    assert len(caught) == 1 and "necessarily covers" not in str(caught[0].message)
+    with pytest.raises(ValueError, match="quadrature limit of 100"):
+        spur.spurhalflife(
+            "y", pd.concat([d] * 3, ignore_index=True), q=101, nrep=100, **opts
+        )
+    with pytest.warns(UserWarning, match="higher spatial frequencies"):
+        small = spur.spurtest_i1("y", d.iloc[:7], q=6, nrep=99, **opts)
+    assert small.all_directions
+
+    theta = 2 * np.pi * np.arange(20) / 20
+    polygon = pd.DataFrame(
+        dict(
+            sx=np.cos(theta),
+            sy=np.sin(theta),
+            y=np.cos(theta) + 0.4 * np.sin(2 * theta),
+        )
+    )
+    assert spur.spurtest_i0("y", polygon, q=14, nrep=199, **opts).tied
+    with pytest.raises(ValueError, match="splits a tied eigenspace"):
+        spur.spurtest_i0("y", polygon, q=15, nrep=199, **opts)
+
+
+@pytest.mark.parametrize("backend", ["fallback", RUST_PARAMETER])
+def test_transforms_include_colocated_rows_and_remove_large_input_offsets(backend):
+    opts: dict[str, Any] = dict(coords_euclidean=["s"], backend=backend, nthreads=1)
+    data = pd.DataFrame(dict(s=[0.0, 0.0, 1.0], y=[2.0, 4.0, 10.0]))
+    for b in (0.5, 1.0):
+        np.testing.assert_allclose(
+            spur.spurtransform("y ~ 1", data, transformation="iso", radius=b, **opts)[
+                "h_y"
+            ],
+            [-2, 2, 0],
+        )
+    np.testing.assert_allclose(
+        spur.spurtransform(
+            "y ~ 1", data, transformation="iso", radius=np.nextafter(1.0, 2.0), **opts
+        )["h_y"],
+        [-5, -2, 7],
+    )
+    data = pd.DataFrame(
+        dict(
+            s=[0.0, 1e-6, 0.3, 0.6, 1.0],
+            y=[1.0, -1.0, 0.0, 0.0, 0.0],
+            x=[1.0, -1.0, 2.0, 0.0, -1.0],
+        )
+    )
+
+    def transformed(d):
+        return spur.spurtransform("y ~ x", d, transformation="lbmgls", **opts)[
+            ["h_y", "h_x"]
+        ].to_numpy()
+
+    np.testing.assert_allclose(
+        transformed(data),
+        transformed(data.assign(y=data.y + 1e9, x=data.x + 1e9)),
+        atol=1e-11,
+        rtol=1e-12,
     )

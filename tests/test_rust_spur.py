@@ -190,6 +190,7 @@ def test_spur_halflife_frozen_emat_parity_and_invariants(
             )
 
             assert ru.backend == "rust"
+            assert fb.pv_mat is not None and fb.hl_grid is not None
             assert ru.pv_mat is not None and ru.hl_grid is not None
             assert len(ru.pv_mat) == len(ru.hl_grid) >= 129
             npt.assert_allclose(ru.hl_grid, fb.hl_grid, rtol=1e-12, atol=0)
@@ -335,7 +336,7 @@ def test_tied_eigenspaces_can_be_retained_only_as_whole_blocks() -> None:
             "y": np.sin(k * 1.3) + np.cos(k * 0.7),
         }
     )
-    opts = dict(coords_euclidean=["x_c", "y_c"], nrep=1000, seed=42)
+    opts: dict[str, Any] = dict(coords_euclidean=["x_c", "y_c"], nrep=1000, seed=42)
     for backend in ("auto", "rust", "fallback"):
         for test in (spur.spurtest_i0, spur.spurhalflife):
             with pytest.raises(ValueError, match="q splits a tied eigenspace"):
